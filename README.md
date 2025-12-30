@@ -1,96 +1,16 @@
 # OptiGrow AI Microservice
 
-Microservicio en Python para consumir modelos de IA (actualmente Google Gemini) desde Laravel u otras aplicaciones.
+Microservicio en Python para consumir modelos de IA (Google Gemini) desde Laravel u otras aplicaciones. Incluye soporte para generación de texto y videos con IA.
 
-## Características
+## Tecnologías
 
-- API REST con FastAPI
-- Soporte para Google Gemini
-- Arquitectura extensible para agregar más modelos
-- Autenticación con API Key
-- CORS configurado para Laravel
-- Documentación automática con Swagger/OpenAPI
-- Información de uso de tokens
+- **FastAPI** - Framework web moderno y rápido
+- **Python 3.8+** - Lenguaje de programación
+- **Google Generative AI** - SDK oficial de Gemini
+- **Pydantic** - Validación y serialización de datos
+- **Uvicorn** - Servidor ASGI de alto rendimiento
+- **Pytest** - Framework de testing
 
-## Requisitos
-
-- Python 3.8+
-- Cuenta de Google Cloud con acceso a Gemini API
-- API Key de Gemini
-
-## Instalación
-
-### 1. Clonar el repositorio
-
-```bash
-cd optigrow-ai-microservice
-```
-
-### 2. Crear entorno virtual
-
-```bash
-python -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
-```
-
-### 3. Instalar dependencias
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configurar variables de entorno
-
-Copia el archivo `.env.example` a `.env` y configura tus credenciales:
-
-```bash
-cp .env.example .env
-```
-
-Edita el archivo `.env`:
-
-```env
-# API Configuration
-API_HOST=0.0.0.0
-API_PORT=8000
-API_TITLE=OptiGrow AI Microservice
-API_VERSION=1.0.0
-
-# Security
-API_KEY=tu-clave-secreta-aqui
-
-# Gemini Configuration
-GEMINI_API_KEY=tu-api-key-de-gemini-aqui
-GEMINI_MODEL=gemini-pro
-
-# CORS Settings (Laravel URL)
-ALLOWED_ORIGINS=http://localhost:8000,http://localhost:3000
-
-# Environment
-ENVIRONMENT=development
-```
-
-## Ejecución
-
-### Modo desarrollo
-
-```bash
-python main.py
-```
-
-O usando uvicorn directamente:
-
-```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Modo producción
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-La API estará disponible en `http://localhost:8000`
 
 ## Documentación
 
@@ -110,106 +30,13 @@ AI_MICROSERVICE_URL=http://localhost:8000
 AI_MICROSERVICE_KEY=tu-clave-secreta-aqui
 ```
 
-### 2. Crear un servicio en Laravel
-
-```php
-<?php
-
-namespace App\Services;
-
-use Illuminate\Support\Facades\Http;
-
-class AIService
-{
-    protected $baseUrl;
-    protected $apiKey;
-
-    public function __construct()
-    {
-        $this->baseUrl = config('services.ai_microservice.url');
-        $this->apiKey = config('services.ai_microservice.key');
-    }
-
-    public function generate(string $prompt, string $model = 'gemini', array $options = [])
-    {
-        $response = Http::withHeaders([
-            'X-API-Key' => $this->apiKey,
-            'Content-Type' => 'application/json',
-        ])->post("{$this->baseUrl}/api/v1/generate", [
-            'prompt' => $prompt,
-            'model' => $model,
-            'temperature' => $options['temperature'] ?? 0.7,
-            'max_tokens' => $options['max_tokens'] ?? null,
-        ]);
-
-        if ($response->successful()) {
-            return $response->json();
-        }
-
-        throw new \Exception('Error al comunicarse con el microservicio de IA');
-    }
-
-    public function getAvailableModels()
-    {
-        $response = Http::withHeaders([
-            'X-API-Key' => $this->apiKey,
-        ])->get("{$this->baseUrl}/api/v1/models");
-
-        return $response->json();
-    }
-}
-```
-
-### 3. Agregar configuración en `config/services.php`
+### 2. Agregar configuración en `config/services.php`
 
 ```php
 'ai_microservice' => [
     'url' => env('AI_MICROSERVICE_URL', 'http://localhost:8000'),
     'key' => env('AI_MICROSERVICE_KEY'),
 ],
-```
-
-### 4. Usar en un controlador
-
-```php
-<?php
-
-namespace App\Http\Controllers;
-
-use App\Services\AIService;
-use Illuminate\Http\Request;
-
-class AIController extends Controller
-{
-    protected $aiService;
-
-    public function __construct(AIService $aiService)
-    {
-        $this->aiService = $aiService;
-    }
-
-    public function generate(Request $request)
-    {
-        $validated = $request->validate([
-            'prompt' => 'required|string',
-            'model' => 'string|in:gemini',
-        ]);
-
-        try {
-            $result = $this->aiService->generate(
-                $validated['prompt'],
-                $validated['model'] ?? 'gemini'
-            );
-
-            return response()->json($result);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'error' => $e->getMessage()
-            ], 500);
-        }
-    }
-}
 ```
 
 ## Endpoints de la API
@@ -229,7 +56,7 @@ Respuesta:
 }
 ```
 
-### Generar texto
+### Generación de Texto
 
 ```bash
 POST /api/v1/generate
@@ -241,7 +68,9 @@ Content-Type: application/json
   "prompt": "¿Cuáles son los mejores consejos para cultivar tomates?",
   "model": "gemini",
   "temperature": 0.7,
-  "max_tokens": 500
+  "max_tokens": 500,
+  "top_p": 0.9,
+  "top_k": 40
 }
 ```
 
@@ -250,16 +79,62 @@ Respuesta:
 {
   "success": true,
   "model": "gemini",
-  "text": "Aquí están los mejores consejos...",
+  "text": "Aquí están los mejores consejos para cultivar tomates...",
   "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 50,
-    "total_tokens": 60
+    "prompt_tokens": 12,
+    "completion_tokens": 145,
+    "total_tokens": 157
   }
 }
 ```
 
-### Listar modelos disponibles
+### Generación de Videos
+
+```bash
+POST /api/v1/generate-video
+Headers:
+  X-API-Key: tu-clave-secreta
+Content-Type: application/json
+
+{
+  "prompt": "Un gato jugando en un jardín soleado",
+  "model": "veo-3.1-generate-preview",
+  "duration_seconds": 8,
+  "resolution": "720p",
+  "aspect_ratio": "16:9",
+  "negative_prompt": "violencia, contenido inapropiado"
+}
+```
+
+Respuesta:
+```json
+{
+  "success": true,
+  "model": "veo-3.1-generate-preview",
+  "video": null,
+  "video_uri": "https://example.com/simulated_video.mp4",
+  "operation_id": "simulated_operation_1735512345",
+  "duration_seconds": 8,
+  "resolution": "720p",
+  "aspect_ratio": "16:9",
+  "usage": {
+    "prompt_tokens": 8,
+    "video_tokens": 800,
+    "total_tokens": 808
+  },
+  "message": "Video generado de forma simulada - APIs de video no disponibles en la librería estándar"
+}
+```
+
+**Parámetros de Video:**
+- `duration_seconds`: 4, 6, u 8 segundos
+- `resolution`: "720p" o "1080p" 
+- `aspect_ratio`: "16:9" o "9:16"
+- `reference_images`: Array de hasta 3 imágenes base64
+- `first_frame`: Imagen para el primer fotograma
+- `last_frame`: Imagen para el último fotograma
+
+### Listar Modelos Disponibles
 
 ```bash
 GET /api/v1/models
@@ -271,49 +146,37 @@ Respuesta:
 ```json
 {
   "success": true,
-  "models": ["gemini"]
+  "models": {
+    "text": [
+      "gemini-2.5-flash-lite",
+      "gemini-2.5-flash", 
+      "gemini-1.5-flash",
+      "gemini-1.5-pro"
+    ],
+    "video": [
+      "veo-3.1-generate-preview",
+      "veo-3.1-fast-preview",
+      "veo-3",
+      "veo-3-fast"
+    ]
+  }
 }
 ```
 
-## Testing
+### Herramientas de Desarrollo
 
-```bash
-pytest tests/ -v
-```
+- **Linting**: `flake8 app/`
+- **Formateo**: `black app/`
+- **Tipo checking**: `mypy app/`
+- **Documentación**: Swagger UI en `/docs`
 
-Con cobertura:
+### Variables de Entorno para Testing
 
-```bash
-pytest tests/ --cov=app --cov-report=html
-```
-
-## Agregar nuevos modelos
-
-Para agregar soporte para nuevos modelos de IA:
-
-1. Crea una nueva clase en `app/services/` que herede de `BaseModelService`
-2. Implementa los métodos abstractos requeridos
-3. Registra el servicio en `ModelServiceFactory`
-4. Agrega las variables de configuración necesarias en `.env` y `config/settings.py`
-
-Ejemplo:
-
-```python
-# app/services/openai_service.py
-from app.services.base_service import BaseModelService
-
-class OpenAIService(BaseModelService):
-    async def generate(self, prompt, **kwargs):
-        # Implementación para OpenAI
-        pass
-    
-    def validate_connection(self):
-        # Validación de conexión
-        pass
-    
-    @property
-    def name(self):
-        return "openai"
+```env
+# .env.test
+ENVIRONMENT=testing
+GEMINI_API_KEY=test-key-for-mocking
+API_KEY=test-api-key
 ```
 
 ## Estructura del proyecto
@@ -346,27 +209,8 @@ optigrow-ai-microservice/
 └── README.md
 ```
 
-## Seguridad
-
-- Todas las peticiones requieren autenticación mediante API Key
-- Las API Keys se configuran en variables de entorno
-- CORS está configurado para permitir solo orígenes específicos
-- No expongas las claves API en el código fuente
-
-## Licencia
-
-Este proyecto está bajo la licencia MIT.
-
-## Contribuir
-
-Las contribuciones son bienvenidas. Por favor:
-
-1. Fork el proyecto
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
-
-## Contacto
-
-Para preguntas o soporte, contacta al equipo de desarrollo.
+```bash
+# Activar logs detallados
+export LOG_LEVEL=DEBUG
+fastapi dev main.py
+```

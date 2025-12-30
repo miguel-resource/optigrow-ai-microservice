@@ -105,6 +105,10 @@ class GenerateVideoRequest(BaseModel):
         default=None, 
         description="Elementos que no se quieren en el video"
     )
+    download_directly: bool = Field(
+        default=False,
+        description="Si es True, retorna el archivo de video directamente en lugar de metadata"
+    )
     
     class Config:
         json_schema_extra = {
@@ -123,21 +127,24 @@ class GenerateVideoResponse(BaseModel):
     """Modelo de respuesta para generación de video"""
     success: bool = Field(..., description="Indica si la petición fue exitosa")
     model: str = Field(..., description="Modelo utilizado")
-    video_uri: Optional[str] = Field(default=None, description="URI del video generado")
+    video_uri: Optional[str] = Field(
+        default=None, 
+        description="URI interna del video (solo para referencia, no accesible directamente)"
+    )
     operation_id: str = Field(..., description="ID de la operación de generación")
     duration_seconds: int = Field(..., description="Duración del video en segundos")
     resolution: str = Field(..., description="Resolución del video")
     aspect_ratio: str = Field(..., description="Relación de aspecto del video")
     usage: Optional[Dict[str, Any]] = Field(default=None, description="Información sobre el uso de tokens")
-    download_url: Optional[str] = Field(default=None, description="URL directa para descargar el video")
+    download_url: str = Field(..., description="URL para descargar el video (usar esta URL)")
     
     class Config:
         json_schema_extra = {
             "example": {
                 "success": True,
                 "model": "veo-3.1-generate-preview",
-                "video_uri": "gs://bucket/video.mp4",
-                "operation_id": "operation-12345",
+                "video_uri": None,
+                "operation_id": "models/veo-3.1-generate-preview/operations/abc123",
                 "duration_seconds": 4,
                 "resolution": "720p",
                 "aspect_ratio": "16:9",
@@ -146,7 +153,7 @@ class GenerateVideoResponse(BaseModel):
                     "video_tokens": 1000,
                     "total_tokens": 1015
                 },
-                "download_url": "http://localhost:8000/api/v1/download-video/operation-12345"
+                "download_url": "http://localhost:8000/api/v1/download-video/models/veo-3.1-generate-preview/operations/abc123"
             }
         }
 
@@ -171,6 +178,162 @@ class HealthResponse(BaseModel):
                     "gemini-1.5-pro",
                     "veo-3.1-generate-preview"
                 ]
+            }
+        }
+
+
+class GenerateVideoFromImagesRequest(BaseModel):
+    """Modelo de petición para generación de video a partir de imágenes"""
+    images: List[str] = Field(
+        ..., 
+        description="Lista de imágenes (URLs o base64), mínimo 2, máximo 10",
+        min_length=2,
+        max_length=10
+    )
+    prompt: str = Field(
+        ..., 
+        description="Descripción narrativa que conecta las imágenes y define el estilo del video"
+    )
+    model: str = Field(
+        default="veo-3.1-generate-preview", 
+        description="Modelo Veo a utilizar",
+        examples=["veo-3.1-generate-preview", "veo-3.1-fast-preview"]
+    )
+    transition_style: str = Field(
+        default="smooth", 
+        description="Estilo de transición entre imágenes",
+        pattern="^(smooth|crossfade|morph|zoom|slide)$"
+    )
+    aspect_ratio: str = Field(
+        default="16:9", 
+        description="Relación de aspecto del video",
+        pattern="^(16:9|9:16|1:1)$"
+    )
+    resolution: str = Field(
+        default="720p", 
+        description="Resolución del video",
+        pattern="^(720p|1080p)$"
+    )
+    duration_seconds: int = Field(
+        default=8, 
+        description="Duración total del video en segundos",
+        ge=4, le=30
+    )
+    fps: int = Field(
+        default=24, 
+        description="Fotogramas por segundo",
+        pattern="^(24|30|60)$"
+    )
+    interpolation_frames: int = Field(
+        default=12, 
+        description="Frames de interpolación entre imágenes",
+        ge=6, le=24
+    )
+    motion_strength: float = Field(
+        default=0.7, 
+        description="Intensidad del movimiento aplicado",
+        ge=0.0, le=1.0
+    )
+    zoom_effect: bool = Field(
+        default=False, 
+        description="Aplicar efecto de zoom sutil en cada imagen"
+    )
+    pan_direction: Optional[str] = Field(
+        default=None, 
+        description="Dirección de paneo",
+        pattern="^(left|right|up|down)$"
+    )
+    fade_transitions: bool = Field(
+        default=True, 
+        description="Usar fundidos suaves entre transiciones"
+    )
+    style: Optional[str] = Field(
+        default=None, 
+        description="Estilo cinematográfico",
+        pattern="^(cinematic|documentary|artistic)$"
+    )
+    seed: Optional[int] = Field(
+        default=None, 
+        description="Semilla para reproducibilidad"
+    )
+    download_directly: bool = Field(
+        default=False,
+        description="Si es True, retorna el archivo de video directamente en lugar de metadata"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "images": [
+                    "https://example.com/image1.jpg",
+                    "https://example.com/image2.jpg",
+                    "https://example.com/image3.jpg"
+                ],
+                "prompt": "Un viaje mágico a través de bosques encantados al atardecer",
+                "model": "veo-3.1-generate-preview",
+                "transition_style": "smooth",
+                "aspect_ratio": "16:9",
+                "resolution": "720p",
+                "duration_seconds": 10,
+                "fps": 24,
+                "motion_strength": 0.8,
+                "zoom_effect": False,
+                "pan_direction": "right",
+                "fade_transitions": True,
+                "style": "cinematic"
+            }
+        }
+
+
+class GenerateVideoFromImagesResponse(BaseModel):
+    """Modelo de respuesta para generación de video desde imágenes"""
+    success: bool = Field(..., description="Indica si la petición fue exitosa")
+    model: str = Field(..., description="Modelo utilizado")
+    video_uri: Optional[str] = Field(
+        default=None, 
+        description="URI interna del video (solo para referencia, no accesible directamente)"
+    )
+    operation_id: str = Field(..., description="ID de la operación de generación")
+    metadata: Dict[str, Any] = Field(..., description="Metadata detallada del video generado")
+    image_count: int = Field(..., description="Número de imágenes procesadas")
+    transitions: List[Dict[str, Any]] = Field(..., description="Lista de transiciones aplicadas")
+    usage: Optional[Dict[str, Any]] = Field(default=None, description="Estadísticas de uso de tokens")
+    download_url: str = Field(..., description="URL para descargar el video (usar esta URL)")
+    message: str = Field(..., description="Mensaje descriptivo del resultado")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "model": "veo-3.1-generate-preview",
+                "video_uri": None,
+                "operation_id": "models/veo-3.1-generate-preview/operations/xyz789",
+                "metadata": {
+                    "source_images": 3,
+                    "duration_seconds": 10,
+                    "fps": 24,
+                    "resolution": "720p",
+                    "aspect_ratio": "16:9",
+                    "transition_style": "smooth",
+                    "total_transitions": 2
+                },
+                "image_count": 3,
+                "transitions": [
+                    {
+                        "from_image": 1,
+                        "to_image": 2,
+                        "style": "smooth",
+                        "duration": 0.5,
+                        "timestamp": 0
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 25,
+                    "image_processing_tokens": 150,
+                    "total_tokens": 425
+                },
+                "download_url": "http://localhost:8000/api/v1/download-video/xyz789",
+                "message": "Video cinematográfico generado exitosamente desde 3 imágenes con transiciones smooth"
             }
         }
 

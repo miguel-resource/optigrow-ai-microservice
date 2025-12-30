@@ -8,6 +8,8 @@ from app.models.schemas import (
     GenerateResponse, 
     GenerateVideoRequest,
     GenerateVideoResponse,
+    GenerateVideoFromImagesRequest,
+    GenerateVideoFromImagesResponse,
     DownloadVideoRequest,
     ErrorResponse, 
     HealthResponse
@@ -151,10 +153,39 @@ async def generate_video(
         
         logger.info(f"Video generado exitosamente con modelo: {request.model}")
         
+        # Si se solicitó descarga directa, retornar el archivo de video
+        if request.download_directly:
+            logger.info("Descargando video directamente...")
+            video_file = service.get_video_from_cache(result["operation_id"])
+            
+            if video_file is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Error al obtener video del caché"
+                )
+            
+            video_data = await service.download_video(
+                video_file=video_file,
+                filename=f"video_{result['operation_id']}.mp4"
+            )
+            
+            logger.info(f"Video descargado directamente ({len(video_data)} bytes)")
+            
+            return StreamingResponse(
+                io.BytesIO(video_data),
+                media_type="video/mp4",
+                headers={
+                    "Content-Disposition": f"attachment; filename=generated_video.mp4",
+                    "Content-Length": str(len(video_data))
+                }
+            )
+        
+        # No incluir video_uri en la respuesta ya que no puede ser accedido directamente
+        # El usuario debe usar download_url que maneja la autenticación
         return GenerateVideoResponse(
             success=True,
             model=request.model,
-            video_uri=result.get("video_uri"),
+            video_uri=None,  # URI interna, no accesible directamente
             operation_id=result["operation_id"],
             duration_seconds=result["duration_seconds"],
             resolution=result["resolution"],
@@ -197,66 +228,33 @@ async def download_video(
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Obtener la operación por ID usando la API real
-        from google.genai import types
-        operation = types.GenerateVideosOperation(name=request.operation_id)
-        operation = service.client.operations.get(operation)
+        # Obtener el video del caché
+        video_file = service.get_video_from_cache(request.operation_id)
         
-        if not operation.done:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La generación del video aún no está completa"
-            )
-        
-        if not hasattr(operation.response, 'generated_videos') or not operation.response.generated_videos:
+        if video_file is None:
+            logger.error(f"Video no encontrado en caché para operation_id: {request.operation_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No se encontró video generado para esta operación"
+                detail=f"Video no encontrado. El video puede haber expirado o el operation_id es incorrecto."
             )
         
-        # Obtener el video
-        video_file = operation.response.generated_videos[0].video
+        # Descargar el video REAL usando la API de Gemini
+        video_data = await service.download_video(
+            video_file=video_file,
+            filename=f"video_{request.operation_id}.mp4"
+        )
         
-        # Descargar el video usando la API real
-        video_data = await service.download_video(video_file)
-        
-        logger.info(f"Video real descargado para operación: {request.operation_id}")
+        logger.info(f"Video REAL descargado para operación: {request.operation_id} ({len(video_data)} bytes)")
         
         # Retornar como respuesta de streaming
         return StreamingResponse(
-            io.BytesIO(fake_video_data),
+            io.BytesIO(video_data),
             media_type="video/mp4",
             headers={
-                "Content-Disposition": f"attachment; filename=generated_video_{operation_id}.mp4",
-                "Content-Length": str(len(fake_video_data)),
-                "X-Video-Duration": "8",
-                "X-Video-Info": f"Simulated 8-second video - Operation: {operation_id}"
+                "Content-Disposition": f"attachment; filename=generated_video_{request.operation_id}.mp4",
+                "Content-Length": str(len(video_data))
             }
         )
-        
-        # TODO: Implementar cuando Veo esté disponible
-        # # Obtener la operación por ID
-        # from google.genai import types
-        # operation = types.GenerateVideosOperation(name=request.operation_id)
-        # operation = service.client.operations.get(operation)
-        # 
-        # if not operation.done:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_400_BAD_REQUEST,
-        #         detail="La generación del video aún no está completa"
-        #     )
-        # 
-        # if not hasattr(operation.response, 'generated_videos') or not operation.response.generated_videos:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_404_NOT_FOUND,
-        #         detail="No se encontró video generado para esta operación"
-        #     )
-        # 
-        # # Obtener el video
-        # video_file = operation.response.generated_videos[0].video
-        # 
-        # # Descargar el video
-        # video_data = await service.download_video(video_file)
         
     except HTTPException:
         raise
@@ -265,11 +263,126 @@ async def download_video(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al descargar video: {str(e)}"
+
+@router.post(
+    "/generate-video-from-images",
+    response_model=GenerateVideoFromImagesResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+        500: {"model": ErrorResponse}
+    },
+    tags=["AI Models"]
+)
+async def generate_video_from_images(
+    request: GenerateVideoFromImagesRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Genera un video cinematográfico a partir de una secuencia de imágenes
+    
+    - **images**: Lista de imágenes (URLs o base64, mínimo 2, máximo 10)
+    - **prompt**: Descripción narrativa que conecta las imágenes
+    - **model**: Modelo Veo a utilizar
+    - **transition_style**: Estilo de transición (smooth, crossfade, morph, zoom, slide)
+    - **aspect_ratio**: Relación de aspecto (16:9, 9:16, 1:1)
+    - **resolution**: Resolución (720p, 1080p)
+    - **duration_seconds**: Duración total (4-30 segundos)
+    - **fps**: Fotogramas por segundo (24, 30, 60)
+    - **interpolation_frames**: Frames de interpolación (6-24)
+    - **motion_strength**: Intensidad del movimiento (0.0-1.0)
+    - **zoom_effect**: Aplicar efecto zoom
+    - **pan_direction**: Dirección de paneo (left, right, up, down)
+    - **fade_transitions**: Usar fundidos suaves
+    - **style**: Estilo cinematográfico (cinematic, documentary, artistic)
+    - **seed**: Semilla para reproducibilidad
+    - **download_directly**: Si retorna el archivo directamente
+    """
+    try:
+        logger.info(f"Solicitud de generación de video desde {len(request.images)} imágenes")
+        logger.info(f"Estilo: {request.transition_style}, Duración: {request.duration_seconds}s, FPS: {request.fps}")
+        logger.info(f"Prompt: {request.prompt[:100]}...")
+        
+        service = GeminiService(api_key=settings.gemini_api_key)
+        
+        result = await service.generate_video_from_images(
+            images=request.images,
+            prompt=request.prompt,
+            model_name=request.model,
+            transition_style=request.transition_style,
+            aspect_ratio=request.aspect_ratio,
+            resolution=request.resolution,
+            duration_seconds=request.duration_seconds,
+            fps=request.fps,
+            interpolation_frames=request.interpolation_frames,
+            motion_strength=request.motion_strength,
+            zoom_effect=request.zoom_effect,
+            pan_direction=request.pan_direction,
+            fade_transitions=request.fade_transitions,
+            style=request.style,
+            seed=request.seed
         )
+        
+        logger.info(f"Video desde imágenes generado exitosamente: {result['operation_id']}")
+        logger.info(f"Metadata: {result['image_count']} imágenes, {len(result['transitions'])} transiciones")
+        
+        # Si se solicitó descarga directa, retornar el archivo de video
+        if request.download_directly:
+            logger.info("Descargando video desde imágenes directamente...")
+            video_file = service.get_video_from_cache(result["operation_id"])
+            
+            if video_file is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Error al obtener video del caché"
+                )
+            
+            video_data = await service.download_video(
+                video_file=video_file,
+                filename=f"video_from_images_{result['operation_id']}.mp4"
+            )
+            
+            logger.info(f"Video desde imágenes descargado directamente ({len(video_data)} bytes)")
+            
+            return StreamingResponse(
+                io.BytesIO(video_data),
+                media_type="video/mp4",
+                headers={
+                    "Content-Disposition": f"attachment; filename=video_from_images_{result['operation_id']}.mp4",
+                    "Content-Length": str(len(video_data))
+                }
+            )
+        
+        # Retornar metadata del video generado
+        return GenerateVideoFromImagesResponse(
+            success=True,
+            model=request.model,
+            video_uri=None,  # URI interna, no accesible directamente
+            operation_id=result["operation_id"],
+            metadata=result["metadata"],
+            image_count=result["image_count"],
+            transitions=result["transitions"],
+            usage=result.get("usage"),
+            download_url=f"http://localhost:8000/api/v1/download-video/{result['operation_id']}",
+            message=result["message"]
+        )
+        
+    except ValueError as ve:
+        logger.error(f"Error de validación en generate_video_from_images: {str(ve)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de validación: {str(ve)}"
+        )
+    except Exception as e:
+        logger.error(f"Error al generar video desde imágenes: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al generar video desde imágenes: {str(e)}"
+        )        )
 
 
 @router.get(
-    "/download-video/{operation_id}",
+    "/download-video/{operation_id:path}",
     responses={
         200: {"content": {"video/mp4": {}}, "description": "Video file"},
         404: {"model": ErrorResponse},
@@ -290,30 +403,23 @@ async def download_video_get(operation_id: str):
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Obtener la operación por ID usando la API real
-        from google.genai import types
-        operation = types.GenerateVideosOperation(name=operation_id)
-        operation = service.client.operations.get(operation)
+        # Obtener el video del caché
+        video_file = service.get_video_from_cache(operation_id)
         
-        if not operation.done:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La generación del video aún no está completa"
-            )
-        
-        if not hasattr(operation.response, 'generated_videos') or not operation.response.generated_videos:
+        if video_file is None:
+            logger.error(f"Video no encontrado en caché para operation_id: {operation_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No se encontró video generado para esta operación"
+                detail=f"Video no encontrado. El video puede haber expirado o el operation_id es incorrecto."
             )
         
-        # Obtener el video
-        video_file = operation.response.generated_videos[0].video
+        # Descargar el video REAL usando la API de Gemini
+        video_data = await service.download_video(
+            video_file=video_file,
+            filename=f"video_{operation_id}.mp4"
+        )
         
-        # Descargar el video usando la API real
-        video_data = await service.download_video(video_file)
-        
-        logger.info(f"Video real descargado para operación: {operation_id}")
+        logger.info(f"Video REAL descargado para operación: {operation_id} ({len(video_data)} bytes)")
         
         # Retornar como respuesta de streaming
         return StreamingResponse(
@@ -325,6 +431,8 @@ async def download_video_get(operation_id: str):
             }
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error al descargar video: {str(e)}")
         raise HTTPException(
