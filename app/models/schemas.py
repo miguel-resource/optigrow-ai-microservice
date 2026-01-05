@@ -1,7 +1,7 @@
 """
 Modelos de datos para las peticiones y respuestas de la API
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 
 
@@ -222,7 +222,7 @@ class GenerateVideoFromImagesRequest(BaseModel):
     fps: int = Field(
         default=24, 
         description="Fotogramas por segundo",
-        pattern="^(24|30|60)$"
+        ge=24, le=60
     )
     interpolation_frames: int = Field(
         default=12, 
@@ -240,8 +240,7 @@ class GenerateVideoFromImagesRequest(BaseModel):
     )
     pan_direction: Optional[str] = Field(
         default=None, 
-        description="Dirección de paneo",
-        pattern="^(left|right|up|down)$"
+        description="Dirección de paneo"
     )
     fade_transitions: bool = Field(
         default=True, 
@@ -249,8 +248,7 @@ class GenerateVideoFromImagesRequest(BaseModel):
     )
     style: Optional[str] = Field(
         default=None, 
-        description="Estilo cinematográfico",
-        pattern="^(cinematic|documentary|artistic)$"
+        description="Estilo cinematográfico"
     )
     seed: Optional[int] = Field(
         default=None, 
@@ -260,6 +258,27 @@ class GenerateVideoFromImagesRequest(BaseModel):
         default=False,
         description="Si es True, retorna el archivo de video directamente en lugar de metadata"
     )
+    
+    @field_validator('fps')
+    @classmethod
+    def validate_fps(cls, v):
+        if v not in [24, 30, 60]:
+            raise ValueError('fps debe ser 24, 30 o 60')
+        return v
+    
+    @field_validator('pan_direction')
+    @classmethod
+    def validate_pan_direction(cls, v):
+        if v is not None and v not in ['left', 'right', 'up', 'down']:
+            raise ValueError('pan_direction debe ser left, right, up o down')
+        return v
+    
+    @field_validator('style')
+    @classmethod
+    def validate_style(cls, v):
+        if v is not None and v not in ['cinematic', 'documentary', 'artistic']:
+            raise ValueError('style debe ser cinematic, documentary o artistic')
+        return v
     
     class Config:
         json_schema_extra = {

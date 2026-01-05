@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # API Configuration
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    api_base_url: str = "http://localhost:8000"
     api_title: str = "OptiGrow AI Microservice"
     api_version: str = "1.0.0"
     
@@ -19,6 +20,8 @@ class Settings(BaseSettings):
     
     # Gemini Configuration
     gemini_api_key: str = ""
+    gemini_project_id: str = ""
+    gemini_location: str = "us-central1"
     
     # CORS Settings
     allowed_origins: str = "http://localhost:8000"
