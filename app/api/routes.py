@@ -1,6 +1,3 @@
-"""
-Endpoints de la API para interactuar con Google Gemini
-"""
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from app.models.schemas import (
@@ -26,9 +23,6 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """
-    Endpoint para verificar el estado del servicio
-    """
     temp_service = GeminiService(api_key=settings.gemini_api_key)
     
     return HealthResponse(
@@ -127,28 +121,19 @@ async def generate_video(
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Procesar imágenes de referencia si se proporcionan
         reference_images = None
         if request.reference_images:
-            # Aquí procesarías las imágenes (URLs o base64)
-            # Por simplicidad, asumimos que ya están en el formato correcto
             reference_images = request.reference_images
         
-        # Procesar primera y última imagen si se proporcionan
         first_frame = request.first_frame
         last_frame = request.last_frame
         
         result = await service.generate_video(
             prompt=request.prompt,
             model_name=request.model,
-            # Simplificar para testing inicial - comentar parámetros complejos
-            # reference_images=reference_images,
-            # first_frame=first_frame,
-            # last_frame=last_frame,
             aspect_ratio=request.aspect_ratio,
             resolution=request.resolution,
-            duration_seconds=request.duration_seconds,
-            # negative_prompt=request.negative_prompt
+            duration_seconds=request.duration_seconds
         )
         
         logger.info(f"Video generado exitosamente con modelo: {request.model}")
@@ -180,12 +165,10 @@ async def generate_video(
                 }
             )
         
-        # No incluir video_uri en la respuesta ya que no puede ser accedido directamente
-        # El usuario debe usar download_url que maneja la autenticación
         return GenerateVideoResponse(
             success=True,
             model=request.model,
-            video_uri=None,  # URI interna, no accesible directamente
+            video_uri=None,
             operation_id=result["operation_id"],
             duration_seconds=result["duration_seconds"],
             resolution=result["resolution"],
@@ -228,7 +211,6 @@ async def download_video(
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Obtener el video del caché
         video_file = service.get_video_from_cache(request.operation_id)
         
         if video_file is None:
@@ -238,7 +220,6 @@ async def download_video(
                 detail=f"Video no encontrado. El video puede haber expirado o el operation_id es incorrecto."
             )
         
-        # Descargar el video REAL usando la API de Gemini
         video_data = await service.download_video(
             video_file=video_file,
             filename=f"video_{request.operation_id}.mp4"
@@ -246,7 +227,6 @@ async def download_video(
         
         logger.info(f"Video REAL descargado para operación: {request.operation_id} ({len(video_data)} bytes)")
         
-        # Retornar como respuesta de streaming
         return StreamingResponse(
             io.BytesIO(video_data),
             media_type="video/mp4",
@@ -404,7 +384,6 @@ async def get_video_preview(operation_id: str):
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Obtener el video del caché
         video_file = service.get_video_from_cache(operation_id)
         
         if video_file is None:
@@ -427,7 +406,6 @@ async def get_video_preview(operation_id: str):
         except Exception as e:
             logger.warning(f"Error accediendo a video_file.uri: {e}")
         
-        # Buscar en otros atributos posibles
         if not video_uri:
             for attr_name in ['url', 'download_url', '_uri', 'path', 'file_uri']:
                 try:
@@ -447,8 +425,6 @@ async def get_video_preview(operation_id: str):
                 detail="No se pudo obtener la URL de previsualización del video"
             )
         
-        # En lugar de retornar la URL de Google (que requiere auth), 
-        # retornamos nuestra propia URL de proxy
         proxy_url = f"{settings.api_base_url}/api/v1/stream-video/{operation_id}"
         
         logger.info(f"Video preview URL generada para operación: {operation_id}")
@@ -492,50 +468,64 @@ async def stream_video(operation_id: str):
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
-        # Obtener el video del caché o recuperarlo
         video_file = service.get_video_from_cache(operation_id)
         
         if video_file is None:
-            # Intentar recuperar de la API
             logger.info(f"Video no en caché, intentando recuperar de API: {operation_id}")
             video_file = await service.get_video_by_operation_id(operation_id)
         
         if video_file is None:
+            logger.error(f"Video no encontrado después de búsqueda exhaustiva: {operation_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Video no encontrado. Puede que haya expirado."
+                detail=f"Video no encontrado para operation_id: {operation_id}. Verifica que la operación haya completado exitosamente."
             )
         
-        # Obtener la URI del video
+        # Intentar obtener la URI del video de múltiples formas
         video_uri = None
-        if hasattr(video_file, 'uri'):
-            video_uri = getattr(video_file, 'uri')
+        video_data = None
+        
+        for uri_attr in ['uri', 'url', 'download_url', '_uri', 'file_uri', 'location']:
+            if hasattr(video_file, uri_attr):
+                uri_value = getattr(video_file, uri_attr)
+                if uri_value and isinstance(uri_value, str) and ('http' in uri_value or 'gs://' in uri_value):
+                    video_uri = uri_value
+                    logger.info(f"URI obtenida de {uri_attr}: {video_uri}")
+                    break
         
         if not video_uri:
+            for data_attr in ['video_bytes', '_content', 'data', 'content']:
+                if hasattr(video_file, data_attr):
+                    data_value = getattr(video_file, data_attr)
+                    if data_value and len(data_value) > 0:
+                        video_data = data_value
+                        logger.info(f"Datos de video obtenidos directamente de {data_attr}: {len(video_data)} bytes")
+                        break
+        
+        if video_uri:
+            logger.info(f"Descargando video desde URI: {video_uri}")
+            
+            import requests
+            headers = {}
+            if settings.gemini_api_key and 'googleapis.com' in video_uri:
+                headers['x-goog-api-key'] = settings.gemini_api_key
+            
+            response = requests.get(video_uri, headers=headers, stream=True, timeout=300)
+            response.raise_for_status()
+            
+            video_data = response.content
+            logger.info(f"Video descargado desde URI: {len(video_data)} bytes")
+        
+        if not video_data:
+            logger.error(f"No se pudo obtener URI ni datos directos del video. Atributos del objeto: {dir(video_file)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="No se pudo obtener la URI del video"
+                detail=f"No se pudo obtener los datos del video. Atributos disponibles: {[attr for attr in dir(video_file) if not attr.startswith('_')]}"
             )
         
-        logger.info(f"Descargando video desde: {video_uri}")
-        
-        # Descargar el video de Google
-        import requests
-        headers = {}
-        if settings.gemini_api_key and 'googleapis.com' in video_uri:
-            headers['x-goog-api-key'] = settings.gemini_api_key
-        
-        response = requests.get(video_uri, headers=headers, stream=True, timeout=300)
-        response.raise_for_status()
-        
-        video_data = response.content
-        logger.info(f"Video descargado: {len(video_data)} bytes")
-        
-        # Generar nombre de archivo limpio
         safe_operation_id = operation_id.split('/')[-1] if '/' in operation_id else operation_id
         filename = f"video_{safe_operation_id}.mp4"
         
-        # Retornar como descarga con headers apropiados
         return StreamingResponse(
             io.BytesIO(video_data),
             media_type="video/mp4",
@@ -585,11 +575,149 @@ async def list_video_cache():
     from app.services.gemini_service import _video_cache
     
     cache_keys = list(_video_cache.keys())
+    cache_details = {}
+    
+    for key in cache_keys:
+        video_obj = _video_cache[key]
+        cache_details[key] = {
+            "type": str(type(video_obj)),
+            "attributes": [attr for attr in dir(video_obj) if not attr.startswith('_')],
+            "has_uri": hasattr(video_obj, 'uri'),
+            "has_video_bytes": hasattr(video_obj, 'video_bytes'),
+            "uri_value": getattr(video_obj, 'uri', None) if hasattr(video_obj, 'uri') else None
+        }
     
     return {
         "success": True,
         "cache_count": len(cache_keys),
         "cached_operations": cache_keys,
+        "cache_details": cache_details,
         "message": f"Hay {len(cache_keys)} videos en caché"
+    }
+
+
+@router.get(
+    "/debug-video/{operation_id:path}",
+    response_model=dict,
+    tags=["Debug"]
+)
+async def debug_video_search(operation_id: str):
+    """
+    Busca un video específico con debugging detallado
+    """
+    from app.services.gemini_service import _video_cache
+    
+    service = GeminiService(api_key=settings.gemini_api_key)
+    
+    search_result = {
+        "operation_id": operation_id,
+        "cache_keys": list(_video_cache.keys()),
+        "direct_match": operation_id in _video_cache,
+        "search_variations": [],
+        "partial_matches": [],
+        "video_found": False,
+        "video_details": None
+    }
+    
+    variations = [
+        operation_id,
+        operation_id.replace("models/", "").replace("projects/", ""),
+        operation_id.split("/")[-1] if "/" in operation_id else operation_id,
+        operation_id.replace("projects/", "video_models/") if operation_id.startswith("projects/") else operation_id,
+        operation_id.replace("models/", "video_models/") if operation_id.startswith("models/") else operation_id
+    ]
+    
+    for variation in variations:
+        found = variation in _video_cache
+        search_result["search_variations"].append({
+            "variation": variation,
+            "found": found
+        })
+        if found and not search_result["video_found"]:
+            search_result["video_found"] = True
+            video_obj = _video_cache[variation]
+            search_result["video_details"] = {
+                "found_with_variation": variation,
+                "type": str(type(video_obj)),
+                "attributes": [attr for attr in dir(video_obj) if not attr.startswith('_')],
+                "has_uri": hasattr(video_obj, 'uri'),
+                "uri_value": getattr(video_obj, 'uri', None) if hasattr(video_obj, 'uri') else None
+            }
+    
+    for cached_key in _video_cache.keys():
+        operation_uuid = operation_id.split('/')[-1] if '/' in operation_id else operation_id
+        cached_uuid = cached_key.split('/')[-1] if '/' in cached_key else cached_key
+        
+        if operation_uuid in cached_key or cached_uuid in operation_id or operation_uuid == cached_uuid:
+            search_result["partial_matches"].append(cached_key)
+            if not search_result["video_found"]:
+                search_result["video_found"] = True
+                video_obj = _video_cache[cached_key]
+                search_result["video_details"] = {
+                    "found_with_partial_match": cached_key,
+                    "type": str(type(video_obj)),
+                    "attributes": [attr for attr in dir(video_obj) if not attr.startswith('_')],
+                    "has_uri": hasattr(video_obj, 'uri'),
+                    "uri_value": getattr(video_obj, 'uri', None) if hasattr(video_obj, 'uri') else None
+                }
+    
+    return {
+        "success": True,
+        "search_result": search_result
+    }
+
+
+@router.post(
+    "/simulate-cache/{operation_id:path}",
+    response_model=dict,
+    tags=["Debug"]
+)
+async def simulate_cache_storage(operation_id: str):
+    """
+    Simula el almacenamiento en caché para debugging
+    """
+    from app.services.gemini_service import _video_cache
+    
+    class MockVideo:
+        def __init__(self):
+            self.uri = "https://example.com/fake-video.mp4"
+            
+        def __str__(self):
+            return "Mock Video Object"
+    
+    mock_video = MockVideo()
+    
+    _video_cache[operation_id] = mock_video
+    
+    operation_uuid = operation_id.split('/')[-1] if '/' in operation_id else operation_id
+    _video_cache[operation_uuid] = mock_video
+    
+    return {
+        "success": True,
+        "message": "Video simulado guardado en caché",
+        "stored_keys": [operation_id, operation_uuid],
+        "cache_size": len(_video_cache)
+    }
+
+
+@router.get(
+    "/debug-disk-cache",
+    response_model=dict,
+    tags=["Debug"]
+)
+async def debug_disk_cache():
+    """
+    Verifica el caché persistido en disco
+    """
+    from app.services.gemini_service import load_cache_from_disk
+    
+    disk_cache = load_cache_from_disk()
+    
+    return {
+        "success": True,
+        "disk_cache_exists": len(disk_cache) > 0,
+        "disk_cache_entries": list(disk_cache.keys()),
+        "disk_cache_details": disk_cache,
+        "message": f"Caché en disco contiene {len(disk_cache)} entradas"
     }
 
