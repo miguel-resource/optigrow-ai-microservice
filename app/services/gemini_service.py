@@ -430,44 +430,50 @@ class GeminiService:
             
             generated_video = operation.response.generated_videos[0]
             
-            logger.info(f"Metada de usage_metadata del video generado: {getattr(operation.response, 'usage_metadata', 'No disponible')}")
-            usage_metadata = None
+            # CÁLCULO REAL DEL CONSUMO basado en videos generados exitosamente
+            # El SDK de google-genai para Veo no devuelve usage_metadata con tokens
+            # Se calcula manualmente: videos_exitosos * duración_configurada
+            
+            # 1. Contar videos realmente generados (después de filtros de seguridad)
+            videos_generated_count = len(operation.response.generated_videos)
+            
+            # 2. Calcular consumo real en segundos
+            consumption_seconds = videos_generated_count * duration_seconds
+            
+            # 3. Estimar costo (aproximadamente $0.40 USD por segundo para Veo 3.1 Standard)
+            cost_per_second = 0.40
+            estimated_cost_usd = consumption_seconds * cost_per_second
+            
+            usage_metadata = {
+                "videos_requested": 1,  # Siempre se pide 1 video
+                "videos_generated": videos_generated_count,
+                "duration_per_video_seconds": duration_seconds,
+                "consumption_seconds": consumption_seconds,
+                "estimated_cost_usd": estimated_cost_usd,
+                "cost_per_second_usd": cost_per_second,
+                "calculation_method": "real_count",
+                "note": "Consumo calculado basado en videos exitosamente generados"
+            }
+            
+            # Información adicional si hay usage_metadata en la respuesta (poco común en Veo)
             if hasattr(operation.response, 'usage_metadata') and operation.response.usage_metadata:
-                usage_metadata = {
-                    "prompt_tokens": getattr(operation.response.usage_metadata, 'prompt_token_count', 0),
-                    "video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', 0),
-                    "total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', 0),
-                    "source": "real"
-                }
-                logger.info(f"Tokens consumidos: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, video: {usage_metadata['video_tokens']})")
-            else:
-                # Estimación más precisa basada en factores reales
-                base_prompt_tokens = len(enhanced_prompt.split())
-                complexity_multiplier = 1.0
-                
-                # Factores que afectan el costo
-                if resolution == "1080p":
-                    complexity_multiplier *= 1.5
-                if motion_strength > 0.7:
-                    complexity_multiplier *= 1.2
-                if aspect_ratio == "9:16":  # Vertical es más complejo
-                    complexity_multiplier *= 1.1
-                
-                estimated_video_tokens = int(duration_seconds * 150 * complexity_multiplier)
-                
-                usage_metadata = {
-                    "prompt_tokens": base_prompt_tokens,
-                    "video_tokens": estimated_video_tokens,
-                    "total_tokens": base_prompt_tokens + estimated_video_tokens,
-                    "source": "estimated",
-                    "complexity_factors": {
-                        "resolution": resolution,
-                        "motion_strength": motion_strength,
-                        "duration": duration_seconds,
-                        "multiplier": complexity_multiplier
+                usage_metadata.update({
+                    "api_usage_metadata": {
+                        "prompt_tokens": getattr(operation.response.usage_metadata, 'prompt_token_count', 0),
+                        "video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', 0),
+                        "total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', 0)
                     }
-                }
-                logger.warning(f"Tokens ESTIMADOS: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, video: {usage_metadata['video_tokens']}) - Factores: {complexity_multiplier}x")
+                })
+                logger.info(f"API usage_metadata disponible: {usage_metadata['api_usage_metadata']}")
+            
+            logger.info(f"Consumo calculado: {consumption_seconds} segundos ({videos_generated_count} videos × {duration_seconds}s)")
+            logger.info(f"Costo estimado: ${estimated_cost_usd:.2f} USD")
+            
+            # Advertir si algunos videos fueron filtrados por seguridad
+            if videos_generated_count == 0:
+                logger.warning("ADVERTENCIA: Ningún video fue generado. Posible filtro de seguridad (RAI). Consumo = 0.")
+            elif videos_generated_count < 1:
+                logger.warning(f"Algunos videos pueden haber sido filtrados por seguridad. Solo {videos_generated_count} de 1 generados.")
             
             logger.info(f"Video generado exitosamente: {duration_seconds}s, {resolution}")
             
@@ -728,31 +734,45 @@ class GeminiService:
             
             generated_video = operation.response.generated_videos[0]
             
-            # Calcular usage metadata
-            base_tokens = len(enhanced_prompt.split())
-            image_processing_tokens = len(processed_images) * 50
-            interpolation_tokens = interpolation_frames * len(processed_images) * 5
-            duration_tokens = duration_seconds * 25
+            videos_generated_count = len(operation.response.generated_videos)
+            
+            consumption_seconds = videos_generated_count * duration_seconds
+            
+            # TODO: Valor actual del 2026, editar si este valor cambia
+            cost_per_second = 0.40
+            estimated_cost_usd = consumption_seconds * cost_per_second
             
             usage_metadata = {
-                "prompt_tokens": base_tokens,
-                "image_processing_tokens": image_processing_tokens,
-                "interpolation_tokens": interpolation_tokens,
-                "video_generation_tokens": duration_tokens,
-                "total_tokens": base_tokens + image_processing_tokens + interpolation_tokens + duration_tokens
+                "videos_requested": 1,  # Siempre se pide 1 video
+                "videos_generated": videos_generated_count,
+                "duration_per_video_seconds": duration_seconds,
+                "consumption_seconds": consumption_seconds,
+                "estimated_cost_usd": estimated_cost_usd,
+                "cost_per_second_usd": cost_per_second,
+                "source_images_count": len(processed_images),
+                "calculation_method": "real_count",
+                "note": "Consumo calculado basado en videos exitosamente generados"
             }
             
             if hasattr(operation.response, 'usage_metadata') and operation.response.usage_metadata:
                 usage_metadata.update({
-                    "actual_prompt_tokens": getattr(operation.response.usage_metadata, 'prompt_token_count', base_tokens),
-                    "actual_video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', duration_tokens),
-                    "actual_total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', usage_metadata["total_tokens"])
+                    "api_usage_metadata": {
+                        "prompt_tokens": getattr(operation.response.usage_metadata, 'prompt_token_count', 0),
+                        "video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', 0),
+                        "total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', 0)
+                    }
                 })
-                logger.info(f"Tokens consumidos: {usage_metadata['actual_total_tokens']} (prompt: {usage_metadata['actual_prompt_tokens']}, video: {usage_metadata['actual_video_tokens']})")
-            else:
-                logger.info(f"Tokens estimados: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, procesamiento: {usage_metadata['image_processing_tokens']}, video: {usage_metadata['video_generation_tokens']})")
+                logger.info(f"API usage_metadata disponible: {usage_metadata['api_usage_metadata']}")
             
-            # Crear metadata detallada
+            logger.info(f"Consumo calculado: {consumption_seconds} segundos ({videos_generated_count} videos × {duration_seconds}s)")
+            logger.info(f"Costo estimado: ${estimated_cost_usd:.2f} USD")
+            logger.info(f"Procesadas {len(processed_images)} imágenes fuente")
+            
+            if videos_generated_count == 0:
+                logger.warning("ADVERTENCIA: Ningún video fue generado. Posible filtro de seguridad (RAI). Consumo = 0.")
+            elif videos_generated_count < 1:
+                logger.warning(f"Algunos videos pueden haber sido filtrados por seguridad. Solo {videos_generated_count} de 1 generados.")
+            
             transitions_applied = []
             for i in range(len(processed_images) - 1):
                 transitions_applied.append({
