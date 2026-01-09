@@ -64,10 +64,12 @@ class GeminiService:
         
         # Usar el SDK estándar de Google AI en lugar de Vertex AI para acceso a generate_videos
         self.client = genai.Client(
-            # api_key=api_key,
-            vertexai=True,  # Usar Vertex AI para modelos Gemini
+            vertexai=settings.gemini_vertexai,
             project=settings.gemini_project_id,
-            location=settings.gemini_location
+            location=settings.gemini_location,
+            http_options=types.HttpOptions(
+                api_version="v1"
+            )
         )
         logger.info(f"GeminiService inicializado con modelo: {model_name} (Google AI SDK)")
     
@@ -262,9 +264,7 @@ class GeminiService:
                 config=config if config else None
             )
             
-            print('Gemini response:', response.text)
-            if hasattr(response, 'usage_metadata'):
-                print('Response usage_metadata:', response.usage_metadata)
+            logger.info(f"Texto generado exitosamente ({len(response.text)} caracteres)")
             
             usage_metadata = None
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
@@ -273,6 +273,7 @@ class GeminiService:
                     "completion_tokens": response.usage_metadata.candidates_token_count,
                     "total_tokens": response.usage_metadata.total_token_count
                 }
+                logger.info(f"Tokens consumidos: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, respuesta: {usage_metadata['completion_tokens']})")
             
             logger.info(f"Respuesta generada exitosamente. Longitud: {len(response.text)} caracteres")
             
@@ -353,10 +354,9 @@ class GeminiService:
             if motion_strength < 0.0 or motion_strength > 1.0:
                 raise ValueError("motion_strength debe estar entre 0.0 y 1.0")
             
-            logger.info(f"Generando video con modelo: {model_name}")
-            logger.info(f"Parámetros: duration={duration_seconds}s, resolution={resolution}, aspect_ratio={aspect_ratio}")
-            logger.info(f"Motion strength: {motion_strength}, Style: {style}")
-            logger.info(f"Prompt: {prompt[:150]}...")
+            logger.info(f"Iniciando generación de video: {duration_seconds}s, {resolution}")
+            logger.info(f"Prompt: {prompt}")
+            logger.info(f"Main args - aspect_ratio: {aspect_ratio}, motion_strength: {motion_strength}, model: {model_name}")
             
             current_model = model_name if model_name else "veo-3.1-generate-preview"
             
@@ -369,33 +369,28 @@ class GeminiService:
             
             image = None
             if first_frame is None:
-                logger.info("Generando imagen de referencia con Nano Banana...")
-                # Step 1: Generate an image with Nano Banana (como en la documentación)
+                logger.info("Generando imagen de referencia...")
                 image_response = self.client.models.generate_content(
                     model="gemini-2.5-flash-image",
                     contents=prompt,
                     config={"response_modalities":['IMAGE']}
                 )
                 
-                # Step 2: Extraer imagen usando .parts[0].as_image() (como en la documentación)
                 try:
                     image = image_response.parts[0].as_image()
-                    logger.info("✓ Imagen de referencia generada exitosamente con Nano Banana")
-                except AttributeError as attr_error:
-                    logger.warning(f"as_image() no disponible: {str(attr_error)}, usando fallback")
+                    logger.info("Imagen de referencia generada")
+                except AttributeError:
                     # Fallback: extraer desde inline_data
                     if hasattr(image_response.parts[0], 'inline_data') and image_response.parts[0].inline_data:
                         import base64
                         image_bytes = base64.b64decode(image_response.parts[0].inline_data.data)
                         image = Image.open(io.BytesIO(image_bytes))
-                        logger.info("✓ Imagen extraída desde inline_data")
+                        logger.info("Imagen extraída desde inline_data")
                     else:
-                        logger.warning("No se pudo generar imagen de referencia, continuando sin ella")
+                        logger.warning("No se pudo generar imagen de referencia")
                         image = None
             elif first_frame is not None:
                 image = first_frame
-                
-            logger.info("Iniciando generación de video con Veo 3.1...")
             
             # Verificar disponibilidad del método
             if not hasattr(self.client.models, 'generate_videos'):
@@ -409,16 +404,10 @@ class GeminiService:
                     prompt=enhanced_prompt,
                     image=image
                 )
-                logger.info(f"✓ Operación de video iniciada: {operation.name}")
-            except AttributeError as attr_error:
-                logger.error(f"AttributeError: {str(attr_error)}")
-                raise Exception(f"Error de atributo: {str(attr_error)}")
+                logger.info(f"Operación iniciada: {operation.name}")
             except Exception as api_error:
                 logger.error(f"Error en generate_videos: {str(api_error)}")
                 raise Exception(f"Error en API de videos: {str(api_error)}")
-            
-            logger.info(f"Operación de video iniciada: {operation.name}")
-            logger.info("Esperando a que se complete la generación...")
             
             max_wait_time = 600
             start_time = time.time()
@@ -428,7 +417,8 @@ class GeminiService:
                 if elapsed_time > max_wait_time:
                     raise Exception(f"Tiempo de espera agotado para la generación de video (>{max_wait_time}s)")
                 
-                logger.info(f"Esperando... ({int(elapsed_time)}s transcurridos)")
+                if int(elapsed_time) % 30 == 0:  # Log cada 30 segundos
+                    logger.info(f"Generando... ({int(elapsed_time)}s)")
                 time.sleep(10)
                 operation = self.client.operations.get(operation)
             
@@ -440,28 +430,51 @@ class GeminiService:
             
             generated_video = operation.response.generated_videos[0]
             
+            logger.info(f"Metada de usage_metadata del video generado: {getattr(operation.response, 'usage_metadata', 'No disponible')}")
             usage_metadata = None
             if hasattr(operation.response, 'usage_metadata') and operation.response.usage_metadata:
                 usage_metadata = {
                     "prompt_tokens": getattr(operation.response.usage_metadata, 'prompt_token_count', 0),
                     "video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', 0),
-                    "total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', 0)
+                    "total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', 0),
+                    "source": "real"
                 }
+                logger.info(f"Tokens consumidos: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, video: {usage_metadata['video_tokens']})")
             else:
+                # Estimación más precisa basada en factores reales
+                base_prompt_tokens = len(enhanced_prompt.split())
+                complexity_multiplier = 1.0
+                
+                # Factores que afectan el costo
+                if resolution == "1080p":
+                    complexity_multiplier *= 1.5
+                if motion_strength > 0.7:
+                    complexity_multiplier *= 1.2
+                if aspect_ratio == "9:16":  # Vertical es más complejo
+                    complexity_multiplier *= 1.1
+                
+                estimated_video_tokens = int(duration_seconds * 150 * complexity_multiplier)
+                
                 usage_metadata = {
-                    "prompt_tokens": len(prompt.split()),
-                    "video_tokens": duration_seconds * 100,
-                    "total_tokens": len(prompt.split()) + (duration_seconds * 100)
+                    "prompt_tokens": base_prompt_tokens,
+                    "video_tokens": estimated_video_tokens,
+                    "total_tokens": base_prompt_tokens + estimated_video_tokens,
+                    "source": "estimated",
+                    "complexity_factors": {
+                        "resolution": resolution,
+                        "motion_strength": motion_strength,
+                        "duration": duration_seconds,
+                        "multiplier": complexity_multiplier
+                    }
                 }
+                logger.warning(f"Tokens ESTIMADOS: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, video: {usage_metadata['video_tokens']}) - Factores: {complexity_multiplier}x")
             
-            logger.info(f"Video REAL generado exitosamente. Duration: {duration_seconds}s, Resolution: {resolution}")
+            logger.info(f"Video generado exitosamente: {duration_seconds}s, {resolution}")
             
-            # Guardar en caché para descargas posteriores con múltiples claves
+            # Guardar en caché para descargas posteriores
             _video_cache[operation.name] = generated_video.video
-            # También guardar con variaciones de clave para facilitar búsqueda
             operation_uuid = operation.name.split('/')[-1] if '/' in operation.name else operation.name
             _video_cache[operation_uuid] = generated_video.video
-            logger.info(f"Video guardado en caché con claves: {operation.name} y {operation_uuid}")
             
             return {
                 "video": generated_video.video,
@@ -606,18 +619,19 @@ class GeminiService:
             if pan_direction not in valid_pan_directions:
                 raise ValueError(f"pan_direction debe ser uno de: {valid_pan_directions[:-1]} o None")
             
-            logger.info(f"Generando video desde {len(images)} imágenes del producto - Duración: {duration_seconds}s")
+            logger.info(f"Generando video desde {len(images)} imágenes - {duration_seconds}s")
             
-            # Procesar todas las imágenes del producto
+            # Procesar todas las imágenes
             processed_images = []
             for i, image in enumerate(images):
                 try:
                     processed_img = self._process_image_input(image)
                     processed_images.append(processed_img)
-                    logger.info(f"Imagen {i+1}/{len(images)} procesada")
                 except Exception as e:
-                    logger.error(f"Error procesando imagen del producto {i+1}: {str(e)}")
+                    logger.error(f"Error procesando imagen {i+1}: {str(e)}")
                     raise ValueError(f"Error en imagen {i+1}: {str(e)}")
+            
+            logger.info(f"Imágenes procesadas: {len(processed_images)}")
             
             time_per_image = duration_seconds / len(processed_images)
             
@@ -661,14 +675,8 @@ class GeminiService:
             else:
                 raise ValueError("No se procesaron imágenes válidas")
             
-            logger.info(f"Iniciando generación con {len(processed_images)} imágenes")
-            
-            # Verificar que el método existe antes de llamarlo
+            # Verificar que el método existe
             if not hasattr(self.client.models, 'generate_videos'):
-                logger.error("Método generate_videos no encontrado en client.models")
-                logger.error(f"Tipo de client: {type(self.client)}")
-                logger.error(f"Tipo de client.models: {type(self.client.models)}")
-                logger.error(f"Métodos disponibles: {[m for m in dir(self.client.models) if not m.startswith('_')]}")
                 raise Exception("El método generate_videos no está disponible. Verifica la instalación del paquete google-genai")
             
             # Step 2: Generate video with Veo (usando PIL Image directamente)
@@ -740,6 +748,9 @@ class GeminiService:
                     "actual_video_tokens": getattr(operation.response.usage_metadata, 'video_token_count', duration_tokens),
                     "actual_total_tokens": getattr(operation.response.usage_metadata, 'total_token_count', usage_metadata["total_tokens"])
                 })
+                logger.info(f"Tokens consumidos: {usage_metadata['actual_total_tokens']} (prompt: {usage_metadata['actual_prompt_tokens']}, video: {usage_metadata['actual_video_tokens']})")
+            else:
+                logger.info(f"Tokens estimados: {usage_metadata['total_tokens']} (prompt: {usage_metadata['prompt_tokens']}, procesamiento: {usage_metadata['image_processing_tokens']}, video: {usage_metadata['video_generation_tokens']})")
             
             # Crear metadata detallada
             transitions_applied = []
@@ -770,19 +781,13 @@ class GeminiService:
             }
             
             _video_cache[operation.name] = generated_video.video
-            # También guardar con variaciones de clave para facilitar búsqueda
             operation_uuid = operation.name.split('/')[-1] if '/' in operation.name else operation.name
             _video_cache[operation_uuid] = generated_video.video
-            
-            # Guardar información de debugging
-            logger.info(f"Video guardado en caché con claves: {operation.name} y {operation_uuid}")
-            logger.info(f"Tamaño actual del caché: {len(_video_cache)} videos")
-            logger.info(f"Todas las claves en caché: {list(_video_cache.keys())}")
             
             # Persistir caché para debugging
             save_cache_to_disk()
             
-            logger.info(f"Video generado exitosamente: {duration_seconds}s, {len(processed_images)} imágenes")
+            logger.info(f"Video generado: {duration_seconds}s desde {len(processed_images)} imágenes")
             
             return {
                 "video": generated_video.video,
@@ -823,72 +828,40 @@ class GeminiService:
         Returns:
             Objeto de video de Gemini o None si no existe
         """
-        # Mostrar todas las claves en caché para debugging
-        logger.info(f"=== BÚSQUEDA EN CACHÉ ===")
-        logger.info(f"Claves en caché: {list(_video_cache.keys())}")
-        logger.info(f"Tamaño del caché: {len(_video_cache)}")
-        logger.info(f"Buscando operation_id: {operation_id}")
-        
-        # Si el caché está vacío, intentar cargar desde disco
-        if len(_video_cache) == 0:
-            logger.warning("Caché vacío, intentando cargar desde disco...")
-            disk_cache = load_cache_from_disk()
-            if disk_cache:
-                logger.info(f"Caché en disco contiene: {list(disk_cache.keys())}")
-                
-                # Verificar si nuestro operation_id está en el caché de disco
-                found_in_disk = False
-                for key in disk_cache.keys():
-                    if operation_id == key or operation_id.split('/')[-1] == key.split('/')[-1]:
-                        found_in_disk = True
-                        logger.warning(f"Video encontrado en caché de disco pero no en memoria!")
-                        logger.warning(f"Esto indica que el caché se perdió entre generación y descarga")
-                        break
-                
-                if found_in_disk:
-                    logger.error("PROBLEMA CONFIRMADO: El caché se pierde entre generación y descarga")
+        # Buscar en caché
+        logger.info(f"Buscando video en caché: {operation_id}")
         
         # Buscar directo en caché
         video = _video_cache.get(operation_id)
         if video:
-            logger.info(f"Video encontrado en caché para operation_id: {operation_id}")
+            logger.info("Video encontrado en caché")
             return video
         
-        # Intentar búsquedas alternativas más exhaustivas
+        # Intentar búsquedas alternativas
         search_variations = [
-            operation_id,
             operation_id.replace("models/", "").replace("projects/", ""),
-            operation_id.split("/")[-1] if "/" in operation_id else operation_id,  # Solo el UUID final
-            operation_id.replace("projects/", "video_models/") if operation_id.startswith("projects/") else operation_id,
-            operation_id.replace("models/", "video_models/") if operation_id.startswith("models/") else operation_id
+            operation_id.split("/")[-1] if "/" in operation_id else operation_id,
         ]
-        
-        logger.info(f"Probando variaciones de búsqueda: {search_variations}")
         
         for variation in search_variations:
             video = _video_cache.get(variation)
             if video:
                 logger.info(f"Video encontrado con variación: {variation}")
-                # Guardar también con la clave original para futuros accesos
                 _video_cache[operation_id] = video
                 return video
         
-        # Buscar por coincidencia parcial (más flexible)
+        # Buscar por coincidencia parcial
         for cached_key in _video_cache.keys():
-            # Extraer el UUID de ambos strings para comparar
             operation_uuid = operation_id.split('/')[-1] if '/' in operation_id else operation_id
             cached_uuid = cached_key.split('/')[-1] if '/' in cached_key else cached_key
             
-            # Si los UUIDs coinciden, es el mismo video
-            if operation_uuid in cached_key or cached_uuid in operation_id or operation_uuid == cached_uuid:
-                logger.info(f"Video encontrado por coincidencia parcial: {cached_key}")
+            if operation_uuid == cached_uuid:
+                logger.info(f"Video encontrado por coincidencia: {cached_key}")
                 video = _video_cache[cached_key]
-                # Guardar también con la clave original
                 _video_cache[operation_id] = video
                 return video
         
-        logger.warning(f"Video no encontrado en caché después de búsqueda exhaustiva")
-        logger.info(f"=== FIN BÚSQUEDA EN CACHÉ ===")
+        logger.warning("Video no encontrado en caché")
         return None
     
     async def download_video(self, video_file, filename: str = "generated_video.mp4") -> bytes:

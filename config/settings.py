@@ -2,6 +2,7 @@
 Configuración del microservicio
 """
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from typing import List
 
 
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_project_id: str = ""
     gemini_location: str = "us-central1"
+    gemini_vertexai: bool = False
     
     # CORS Settings
     allowed_origins: str = "http://localhost:8000"
@@ -34,9 +36,10 @@ class Settings(BaseSettings):
         """Convierte la cadena de orígenes permitidos en una lista"""
         return [origin.strip() for origin in self.allowed_origins.split(",")]
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=False
+    )
 
 
 # Instancia global de configuración
