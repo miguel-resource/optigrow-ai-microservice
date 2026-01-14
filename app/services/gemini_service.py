@@ -521,8 +521,8 @@ class GeminiService:
         resolution: str = "720p",
         duration_seconds: int = 8,
         fps: int = 24,
-        interpolation_frames: int = 12,
-        motion_strength: float = 0.7,
+        interpolation_frames: int = 8,
+        motion_strength: float = 0.3,
         zoom_effect: bool = False,
         pan_direction: Optional[str] = None,
         fade_transitions: bool = True,
@@ -553,8 +553,12 @@ class GeminiService:
             resolution (str): Resolución de salida ("720p", "1080p") (default: "720p")
             duration_seconds (int): Duración total del video (4-30 segundos) (default: 8)
             fps (int): Fotogramas por segundo (24, 30, 60) (default: 24)
-            interpolation_frames (int): Frames de interpolación entre imágenes (6-24) (default: 12)
-            motion_strength (float): Intensidad del movimiento aplicado (0.0-1.0) (default: 0.7)
+            interpolation_frames (int): Frames de interpolación entre imágenes (6-16) (default: 8)
+                                       Valores bajos (6-10) mantienen fidelidad al producto.
+                                       Valores altos (12-16) pueden generar contenido interpolado no deseado.
+            motion_strength (float): Intensidad del movimiento aplicado (0.0-1.0) (default: 0.3)
+                                   Valores bajos (0.1-0.4) mantienen fidelidad al producto.
+                                   Valores altos (0.6-1.0) pueden generar contenido no relacionado.
             zoom_effect (bool): Aplicar efecto de zoom sutil en cada imagen (default: False)
             pan_direction (Optional[str]): Dirección de paneo ("left", "right", "up", "down", None)
             fade_transitions (bool): Usar fundidos suaves entre transiciones (default: True)
@@ -642,28 +646,32 @@ class GeminiService:
             time_per_image = duration_seconds / len(processed_images)
             
             enhanced_prompt = f"""
-            Crear un video promocional de {duration_seconds} segundos que muestre este producto específico 
+            Crear un video promocional de {duration_seconds} segundos que muestre EXACTAMENTE este producto específico 
             usando estas {len(processed_images)} imágenes del producto. {prompt}
             
-            El video debe mostrar exactamente el producto de las imágenes proporcionadas, 
-            manteniendo sus características, colores, forma y detalles específicos.
+            IMPORTANTE: El video debe mostrar únicamente el producto real de las imágenes proporcionadas, 
+            manteniendo EXACTAMENTE sus características, colores, forma, textura y todos los detalles específicos.
+            NO inventar ni añadir elementos, características o detalles que no estén en las imágenes originales.
+            NO cambiar la apariencia, forma, o características del producto durante transiciones o zooms.
+            Mantener absoluta fidelidad visual al producto mostrado en las imágenes.
             
-            Transiciones {transition_style} entre cada imagen ({time_per_image:.1f}s por imagen).
+            Transiciones {transition_style} suaves y conservadoras entre cada imagen ({time_per_image:.1f}s por imagen).
+            Evitar movimientos bruscos o efectos que puedan distorsionar la apariencia del producto.
             """
             
             if zoom_effect:
-                enhanced_prompt += "\n- Aplicar zoom cinematográfico sutil en cada imagen"
+                enhanced_prompt += "\n- Aplicar zoom MUY sutil y controlado (máximo 10% de cambio) manteniendo EXACTAMENTE la integridad y apariencia del producto. NO inventar detalles durante el zoom."
             
             if pan_direction:
-                enhanced_prompt += f"\n- Movimiento de cámara hacia {pan_direction} durante las transiciones"
+                enhanced_prompt += f"\n- Movimiento de cámara hacia {pan_direction} de forma muy suave y conservadora, sin distorsionar el producto."
             
             if fade_transitions:
-                enhanced_prompt += "\n- Fundidos suaves y naturales entre secuencias"
+                enhanced_prompt += "\n- Usar fundidos muy suaves para transiciones elegantes entre imágenes, manteniendo consistencia visual del producto."
             
             if style:
                 enhanced_prompt = f"[{style.upper()} CINEMATOGRAPHY] {enhanced_prompt}"
             
-            enhanced_prompt += "\n\nMantener coherencia visual, fluidez temporal y continuidad narrativa."
+            enhanced_prompt += "\n\nMantener coherencia visual, fluidez temporal y continuidad narrativa.\n\nRESTRICCIONES CRÍTICAS:\n- NO crear, inventar o añadir elementos que no estén en las imágenes originales\n- NO modificar la forma, color, textura o características del producto\n- NO generar fondos, objetos o elementos adicionales no presentes en las imágenes\n- Mantener absoluta fidelidad al producto real mostrado en las imágenes de referencia\n- Priorizar la precisión visual sobre la creatividad artística"
             
             current_model = model_name if model_name else "veo-3.1-generate-preview"
             reference_image_obj = None
@@ -698,16 +706,23 @@ class GeminiService:
                 )
                 
                 if not enhanced_prompt or not isinstance(enhanced_prompt, str):
-                    final_prompt = "Cinematic slow motion shot, high quality, 4k"
+                    final_prompt = "Subtle camera movement showcasing product details, high quality, 4k"
                 else:
                     final_prompt = enhanced_prompt
+                    # Solo añadir movimiento si no hay instrucciones específicas y es necesario
                     if not any(word in final_prompt.lower() for word in ['movement', 'zoom', 'pan', 'cinematic', 'motion', 'flowing', 'moving']):
-                        final_prompt += ", cinematic movement, flowing motion, high quality"
+                        final_prompt += ", very subtle camera movement, minimal motion, product focus"
+
+                generation_config = types.GenerateVideosConfig(
+                    aspect_ratio="16:9",
+                    negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
+                )
 
                 operation = self.client.models.generate_videos(
                     model=current_model,
                     prompt=final_prompt,
-                    image=image_input
+                    image=image_input,
+                    config=generation_config
                 )
                 
                 logger.info(f"Operación iniciada: {operation.name}")
