@@ -12,9 +12,30 @@ import requests
 import time
 import json
 import tempfile
+import datetime
+from google.cloud import storage
 
 logger = logging.getLogger(__name__)
 _video_cache: Dict[str, Any] = {}
+
+"""
+GENERACIÓN DE VIDEOS CON VEO 3.1
+
+Límites importantes de la API:
+- Veo tiene un límite estricto de 4, 6 u 8 segundos por generación
+- IMPORTANTE: Las extensiones Video-to-Video pueden no estar disponibles en todos los modelos
+  Si las extensiones fallan, considera usar solo videos de 4, 6 u 8 segundos
+
+Duraciones soportadas actualmente:
+- Videos garantizados (1 bloque): 4, 6, 8 segundos
+- Videos experimentales (requieren extensiones): 16, 24, 32, 40, 48, 56, 64 segundos
+  NOTA: Las extensiones pueden fallar si el modelo no las soporta o por filtros de contenido
+
+Métodos clave:
+- generate_video(): Generación base simple (4, 6 u 8s) - SIEMPRE FUNCIONA
+- generate_video_from_images(): Intenta manejar bloques para duraciones largas - EXPERIMENTAL
+- extend_video(): Extiende un video existente - PUEDE NO ESTAR DISPONIBLE
+"""
 
 # Función para persistir caché temporalmente
 def save_cache_to_disk():
@@ -47,6 +68,128 @@ def load_cache_from_disk():
     except Exception as e:
         logger.warning(f"No se pudo cargar caché desde disco: {e}")
         return {}
+
+def generate_signed_url(gcs_uri: str, expiration_minutes: int = 15) -> str:
+    """
+    Genera una URL firmada temporal para un video almacenado en Google Cloud Storage
+    
+    Args:
+        gcs_uri: URI del formato gs://bucket/path/video.mp4
+        expiration_minutes: Tiempo de expiración en minutos (default: 15)
+        
+    Returns:
+        URL firmada temporal para acceder al video
+        
+    Raises:
+        Exception: Si hay errores al generar la URL firmada
+    """
+    try:
+        if not gcs_uri or not gcs_uri.startswith('gs://'):
+            raise ValueError(f"URI inválida, debe empezar con 'gs://': {gcs_uri}")
+        
+        # Convertimos gs://bucket/path/video.mp4 -> bucket, path/video.mp4
+        path_parts = gcs_uri.replace("gs://", "").split("/", 1)
+        if len(path_parts) != 2:
+            raise ValueError(f"Formato de URI GCS inválido: {gcs_uri}")
+        
+        bucket_name = path_parts[0]
+        blob_name = path_parts[1]
+        
+        logger.info(f"Generando URL firmada para: bucket={bucket_name}, blob={blob_name}")
+        
+        # Crear cliente de Google Cloud Storage con proyecto explícito
+        try:
+            if settings.gemini_project_id:
+                storage_client = storage.Client(project=settings.gemini_project_id)
+                logger.info(f"Usando proyecto explícito: {settings.gemini_project_id}")
+            else:
+                storage_client = storage.Client()
+                logger.warning("No se configuró GEMINI_PROJECT_ID, usando proyecto por defecto")
+        except Exception as client_error:
+            logger.error(f"Error creando cliente GCS: {client_error}")
+            raise Exception(f"Error configurando cliente GCS: {client_error}")
+        
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        
+        # Verificar que el blob existe
+        if not blob.exists():
+            logger.warning(f"El video no existe en GCS: {gcs_uri}")
+            # No lanzar error, permitir que el sistema continúe
+            return None
+        
+        # Generar URL firmada válida por el tiempo especificado
+        try:
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=datetime.timedelta(minutes=expiration_minutes),
+                method="GET",
+            )
+            
+            logger.info(f"URL firmada generada exitosamente (expira en {expiration_minutes}min)")
+            return url
+            
+        except Exception as signing_error:
+            error_msg = str(signing_error).lower()
+            
+            # Error específico de credenciales
+            if "private key" in error_msg or "service account" in error_msg:
+                logger.warning(f"No se pueden firmar URLs con credenciales actuales: {signing_error}")
+                logger.info("Para URLs firmadas, configura Service Account. Ver SERVICE_ACCOUNT_SETUP.md")
+                logger.info("Alternativa temporal: Hacer bucket público con 'gsutil iam ch allUsers:objectViewer gs://ai_microservice_videos'")
+                
+                # Devolver URL pública si el objeto es accesible públicamente
+                try:
+                    public_url = f"https://storage.googleapis.com/{bucket_name}/{blob_name}"
+                    logger.info(f"Intentando URL pública: {public_url}")
+                    return public_url
+                except:
+                    return None
+            else:
+                logger.error(f"Error firmando URL: {signing_error}")
+                return None
+        
+    except Exception as e:
+        logger.error(f"Error generando URL firmada para {gcs_uri}: {str(e)}")
+        # No lanzar excepción, devolver None para permitir fallback
+        return None
+
+def generate_gcs_output_uri(bucket_name: str, base_path: str = "videos/generated/") -> str:
+    """
+    Genera una URI de salida para almacenar videos en Google Cloud Storage
+    
+    Args:
+        bucket_name: Nombre del bucket (sin gs://)
+        base_path: Ruta base dentro del bucket
+        
+    Returns:
+        URI completa de GCS en formato gs://bucket/path/video_timestamp.mp4
+    """
+    try:
+        if not bucket_name:
+            raise ValueError("bucket_name no puede estar vacío")
+        
+        import uuid
+        import time
+        
+        # Generar nombre único del archivo
+        timestamp = int(time.time())
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"video_{timestamp}_{unique_id}.mp4"
+        
+        # Asegurar que base_path termina con /
+        if base_path and not base_path.endswith('/'):
+            base_path += '/'
+        
+        # Construir URI completa
+        gcs_uri = f"gs://{bucket_name}/{base_path}{filename}"
+        
+        logger.info(f"URI de salida GCS generada: {gcs_uri}")
+        return gcs_uri
+        
+    except Exception as e:
+        logger.error(f"Error generando URI de salida GCS: {str(e)}")
+        raise Exception(f"Error generando URI de salida: {str(e)}")
 
 
 class GeminiService:
@@ -87,88 +230,6 @@ class GeminiService:
             "gemini-1.5-pro"
         ]
     
-    def _convert_pil_to_veo_format(self, pil_image: Any) -> Dict[str, str]:
-        """
-        Convierte una imagen PIL al formato requerido por la API de Veo
-        
-        Args:
-            pil_image: Objeto PIL Image
-            
-        Returns:
-            Dict con bytesBase64Encoded y mimeType
-        """
-        try:
-            import base64
-            import io
-            
-            # Convertir a RGB si es necesario
-            if pil_image.mode not in ('RGB', 'RGBA'):
-                pil_image = pil_image.convert('RGB')
-            
-            # Convertir PIL Image a bytes
-            buffer = io.BytesIO()
-            
-            # Determinar formato y MIME type
-            format_type = 'JPEG'
-            mime_type = 'image/jpeg'
-            
-            # Si es RGBA, usar PNG para preservar transparencia
-            if pil_image.mode == 'RGBA':
-                format_type = 'PNG'
-                mime_type = 'image/png'
-            
-            pil_image.save(buffer, format=format_type, quality=95)
-            image_bytes = buffer.getvalue()
-            
-            # Codificar a base64
-            base64_encoded = base64.b64encode(image_bytes).decode('utf-8')
-            
-            logger.info(f"Imagen convertida al formato Veo: {mime_type}, tamaño: {len(base64_encoded)} caracteres")
-            
-            return {
-                "bytesBase64Encoded": base64_encoded,
-                "mimeType": mime_type
-            }
-            
-        except Exception as e:
-            logger.error(f"Error al convertir imagen PIL al formato Veo: {str(e)}")
-            raise Exception(f"Error al convertir imagen al formato Veo: {str(e)}")
-        """
-        Convierte una imagen PIL o bytes a string base64
-        
-        Args:
-            image_input: Imagen PIL, bytes, o string base64
-            
-        Returns:
-            String base64 de la imagen
-        """
-        try:
-            if isinstance(image_input, str):
-                # Ya es base64 o necesita procesamiento
-                if image_input.startswith('data:'):
-                    # Extraer solo el base64
-                    return image_input.split(',')[1]
-                else:
-                    # Asumir que ya es base64
-                    return image_input
-            elif hasattr(image_input, 'save'):  # PIL Image
-                # Convertir PIL Image a base64
-                import io
-                import base64
-                buffer = io.BytesIO()
-                image_input.save(buffer, format='JPEG')
-                image_bytes = buffer.getvalue()
-                return base64.b64encode(image_bytes).decode('utf-8')
-            elif isinstance(image_input, bytes):
-                # Bytes directos
-                import base64
-                return base64.b64encode(image_input).decode('utf-8')
-            else:
-                raise ValueError(f"Tipo de imagen no soportado: {type(image_input)}")
-        except Exception as e:
-            logger.error(f"Error convirtiendo imagen a base64: {str(e)}")
-            raise Exception(f"Error convirtiendo imagen a base64: {str(e)}")
-
     def _process_image_input(self, image_input: Union[str, Any]) -> Any:
         """
         Procesa una imagen de entrada que puede ser URL, base64 o objeto Image
@@ -317,7 +378,8 @@ class GeminiService:
             last_frame (Optional[Any]): Imagen para el último fotograma del video
             aspect_ratio (str): Relación de aspecto del video ("16:9", "9:16", "1:1") (default: "16:9")
             resolution (str): Resolución de salida ("720p", "1080p") (default: "720p")
-            duration_seconds (int): Duración en segundos (4, 6, 8, 10) (default: 8)
+            duration_seconds (int): Duración en segundos - SOLO valores base: 4, 6, 8 (default: 8)
+                                  Nota: Para videos largos, usa generate_video_from_images que maneja bloques automáticamente
             negative_prompt (Optional[str]): Descripción de elementos que NO se desean en el video
             style (Optional[str]): Estilo visual específico ("cinematic", "realistic", "animation", "documentary")
             motion_strength (float): Intensidad del movimiento (0.0-1.0, default: 0.5)
@@ -347,9 +409,10 @@ class GeminiService:
             if resolution not in valid_resolutions:
                 raise ValueError(f"resolution debe ser una de: {valid_resolutions}")
             
-            valid_durations = [4, 6, 8, 10]
-            if duration_seconds not in valid_durations:
-                raise ValueError(f"duration_seconds debe ser uno de: {valid_durations}")
+            # Veo tiene límite estricto de 4, 6 u 8 segundos por generación base
+            valid_base_durations = [4, 6, 8]
+            if duration_seconds not in valid_base_durations:
+                raise ValueError(f"duration_seconds debe ser uno de: {valid_base_durations} (límite de Veo para generación base)")
             
             if motion_strength < 0.0 or motion_strength > 1.0:
                 raise ValueError("motion_strength debe estar entre 0.0 y 1.0")
@@ -482,15 +545,32 @@ class GeminiService:
             operation_uuid = operation.name.split('/')[-1] if '/' in operation.name else operation.name
             _video_cache[operation_uuid] = generated_video.video
             
+            # Generar URL firmada si el video tiene URI de GCS
+            video_uri = generated_video.video.uri if hasattr(generated_video.video, 'uri') else None
+            signed_url = None
+            
+            if video_uri and video_uri.startswith('gs://'):
+                try:
+                    signed_url = generate_signed_url(video_uri, expiration_minutes=15)
+                    logger.info(f"URL firmada generada para video: {signed_url[:50]}...")
+                except Exception as e:
+                    logger.warning(f"No se pudo generar URL firmada: {e}")
+            
             return {
                 "video": generated_video.video,
-                "video_uri": generated_video.video.uri if hasattr(generated_video.video, 'uri') else None,
+                "video_uri": video_uri,
+                "signed_url": signed_url,
                 "operation_id": operation.name,
                 "duration_seconds": duration_seconds,
                 "resolution": resolution,
                 "aspect_ratio": aspect_ratio,
                 "usage": usage_metadata,
-                "message": "Video generado exitosamente con Veo 3.1"
+                "message": "Video generado exitosamente con Veo 3.1",
+                "download_info": {
+                    "gcs_uri": video_uri,
+                    "public_url": signed_url,
+                    "expires_in_minutes": 15 if signed_url else None
+                }
             }
             
         except Exception as e:
@@ -511,6 +591,173 @@ class GeminiService:
             else:
                 raise Exception(f"Error de Veo API: {error_message}")
     
+    async def extend_video(
+        self,
+        previous_video_obj: Any,
+        prompt: str,
+        extension_seconds: int = 7,
+        model_name: str = "veo-3.1-generate-preview",
+        aspect_ratio: str = "16:9"
+    ) -> Dict[str, Any]:
+        """
+        Extiende un video existente por 7 segundos adicionales usando Video-to-Video.
+        
+        Args:
+            previous_video_obj: Objeto de video de Gemini retornado por generación anterior
+            prompt: Descripción de lo que sucede en la extensión (evolución de la historia)
+            extension_seconds: Duración de la extensión (solo 7 segundos soportado en Veo 3.1)
+            model_name: Modelo Veo a utilizar
+            aspect_ratio: Debe coincidir con el video original
+            
+        Returns:
+            Dict con información del video extendido
+        """
+        try:
+            # Veo 3.1 solo soporta extensiones de 7 segundos
+            valid_extension_durations = [7]
+            if extension_seconds not in valid_extension_durations:
+                raise ValueError(f"extension_seconds debe ser uno de: {valid_extension_durations}. Veo 3.1 cambió las reglas de extensión.")
+            
+            logger.info(f"Extendiendo video por {extension_seconds}s adicionales...")
+            logger.info(f"Prompt extensión: {prompt}")
+            
+            # Para extensiones, necesitamos URI de salida en GCS
+            output_storage_uri = None
+            if settings.gcs_bucket_name:
+                output_storage_uri = generate_gcs_output_uri(
+                    bucket_name=settings.gcs_bucket_name,
+                    base_path=settings.gcs_output_path
+                )
+                logger.info(f"Usando output_storage_uri para extensión: {output_storage_uri}")
+            else:
+                logger.warning("No se configuró GCS bucket, intentando sin storage URI...")
+
+            # Configuración para extensiones que pueden requerir storage URI
+            try:
+                extension_config = types.GenerateVideosConfig(
+                    duration_seconds=extension_seconds
+                )
+                
+                # Agregar output_storage_uri si está disponible
+                if output_storage_uri:
+                    extension_config.output_gcs_uri = output_storage_uri
+
+                operation = self.client.models.generate_videos(
+                    model=model_name,
+                    prompt=prompt,
+                    video=previous_video_obj,
+                    config=extension_config
+                )
+                
+            except Exception as config_error:
+                logger.warning(f"Error con configuración de extensión: {config_error}")
+                # Fallback: intentar sin storage URI
+                extension_config = types.GenerateVideosConfig(
+                    duration_seconds=extension_seconds
+                )
+
+                operation = self.client.models.generate_videos(
+                    model=model_name,
+                    prompt=prompt,
+                    video=previous_video_obj,
+                    config=extension_config
+                )
+            
+            logger.info(f"Operación de extensión iniciada: {operation.name}")
+            
+            max_wait_time = 600
+            start_time = time.time()
+            
+            while not operation.done:
+                elapsed_time = time.time() - start_time
+                if elapsed_time > max_wait_time:
+                    raise Exception(f"Timeout en extensión de video (>{max_wait_time//60}min)")
+                
+                time.sleep(15)
+                operation = self.client.operations.get(operation)
+            
+            # Log detallado de la respuesta para debugging
+            logger.info(f"Operación de extensión completada. Has response: {hasattr(operation, 'response')}")
+            if hasattr(operation, 'response') and operation.response:
+                logger.info(f"Response type: {type(operation.response)}")
+                logger.info(f"Response attributes: {dir(operation.response)}")
+                logger.info(f"Has generated_videos: {hasattr(operation.response, 'generated_videos')}")
+                
+            # Verificar si hay errores específicos
+            if hasattr(operation, 'error') and operation.error:
+                error_detail = str(operation.error)
+                logger.error(f"Operation error: {operation.error}")
+                
+                # Error específico para videos grandes
+                if "output storage uri is required" in error_detail.lower():
+                    raise Exception(
+                        "Video de extensión demasiado grande. Se requiere configurar un bucket de Google Cloud Storage. "
+                        "Para videos largos (>8s), Vertex AI requiere almacenamiento en GCS. "
+                        f"Error original: {error_detail}"
+                    )
+                else:
+                    raise Exception(f"Error en extensión: {operation.error}")
+            
+            if not hasattr(operation, 'response') or not operation.response:
+                # Intentar obtener más información del error
+                error_detail = ""
+                if hasattr(operation, 'metadata') and operation.metadata:
+                    logger.error(f"Operation metadata: {operation.metadata}")
+                    error_detail = f" Metadata: {operation.metadata}"
+                raise Exception(f"Operación de extensión completada sin respuesta válida{error_detail}")
+                
+            if not hasattr(operation.response, 'generated_videos') or not operation.response.generated_videos:
+                raise Exception("No se generaron videos en la extensión")
+            
+            generated_video = operation.response.generated_videos[0]
+            
+            # Guardar en caché
+            _video_cache[operation.name] = generated_video.video
+            operation_uuid = operation.name.split('/')[-1] if '/' in operation.name else operation.name
+            _video_cache[operation_uuid] = generated_video.video
+            
+            # Generar URL firmada para la extensión
+            video_uri = None
+            signed_url = None
+            
+            # Verificar si el video se guardó en GCS
+            if output_storage_uri and hasattr(generated_video.video, 'uri'):
+                video_uri = generated_video.video.uri or output_storage_uri
+            elif hasattr(generated_video.video, 'uri'):
+                video_uri = generated_video.video.uri
+            
+            if video_uri and video_uri.startswith('gs://'):
+                try:
+                    signed_url = generate_signed_url(video_uri, expiration_minutes=15)
+                    logger.info(f"URL firmada generada para extensión: {signed_url[:50]}...")
+                except Exception as e:
+                    logger.warning(f"No se pudo generar URL firmada para extensión: {e}")
+            
+            logger.info(f"Video extendido exitosamente: +{extension_seconds}s")
+            
+            return {
+                "video": generated_video.video,
+                "video_uri": video_uri,
+                "signed_url": signed_url,
+                "output_storage_uri": output_storage_uri,
+                "operation_id": operation.name,
+                "duration_seconds": extension_seconds,
+                "metadata": {
+                    "type": "extension",
+                    "duration": extension_seconds,
+                    "aspect_ratio": aspect_ratio
+                },
+                "download_info": {
+                    "gcs_uri": video_uri,
+                    "public_url": signed_url,
+                    "expires_in_minutes": 15 if signed_url else None
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error en extensión de video: {str(e)}")
+            raise Exception(f"Error en extensión de video: {str(e)}")
+    
     async def generate_video_from_images(
         self,
         images: List[Union[str, Any]],
@@ -519,7 +766,7 @@ class GeminiService:
         transition_style: str = "smooth",
         aspect_ratio: str = "16:9",
         resolution: str = "720p",
-        duration_seconds: int = 8,
+        duration_seconds: int = 15,
         fps: int = 24,
         interpolation_frames: int = 8,
         motion_strength: float = 0.3,
@@ -551,7 +798,10 @@ class GeminiService:
                                   - "slide": Deslizamiento direccional
             aspect_ratio (str): Relación de aspecto ("16:9", "9:16", "1:1") (default: "16:9")
             resolution (str): Resolución de salida ("720p", "1080p") (default: "720p")
-            duration_seconds (int): Duración total del video (4-30 segundos) (default: 8)
+            duration_seconds (int): Duración total del video en segundos (default: 15)
+                                  - Videos se generan con bloque base de 8s + extensiones de 7s
+                                  - Valores válidos: 15, 22, 29, 36, 43, 50, 57
+                                  - Nota: Videos largos toman más tiempo (~10-15 min por bloque/extensión)
             fps (int): Fotogramas por segundo (24, 30, 60) (default: 24)
             interpolation_frames (int): Frames de interpolación entre imágenes (6-16) (default: 8)
                                        Valores bajos (6-10) mantienen fidelidad al producto.
@@ -615,8 +865,12 @@ class GeminiService:
             if aspect_ratio not in valid_aspects:
                 raise ValueError(f"aspect_ratio debe ser uno de: {valid_aspects}")
             
-            if duration_seconds < 4 or duration_seconds > 30:
-                raise ValueError("duration_seconds debe estar entre 4 y 30")
+            # Duraciones totales permitidas (se generarán por bloques de 8s base + extensiones de 7s)
+            # Base: 8s, Extensiones: 7s cada una
+            # Resultados posibles: 15 (8+7), 22 (8+7+7), 29 (8+7+7+7), etc.
+            valid_total_durations = [15, 22, 29, 36, 43, 50, 57]
+            if duration_seconds not in valid_total_durations:
+                raise ValueError(f"duration_seconds debe ser uno de: {valid_total_durations} (8s base + múltiplos de 7s)")
             
             valid_fps = [24, 30, 60]
             if fps not in valid_fps:
@@ -630,6 +884,18 @@ class GeminiService:
                 raise ValueError(f"pan_direction debe ser uno de: {valid_pan_directions[:-1]} o None")
             
             logger.info(f"Generando video desde {len(images)} imágenes - {duration_seconds}s")
+            
+            # Determinar si necesitamos generar por bloques
+            base_duration = 8  # Duración del bloque base
+            extension_duration = 7  # Duración de cada extensión (Veo 3.1 spec)
+            needs_extension = duration_seconds > base_duration
+            num_extensions = 0
+            
+            if needs_extension:
+                # Calcular cuántas extensiones necesitamos
+                remaining_duration = duration_seconds - base_duration
+                num_extensions = remaining_duration // extension_duration
+                logger.info(f"Video largo detectado: {duration_seconds}s = {base_duration}s base + {num_extensions} extensiones de {extension_duration}s")
             
             # Procesar todas las imágenes
             processed_images = []
@@ -713,10 +979,38 @@ class GeminiService:
                     if not any(word in final_prompt.lower() for word in ['movement', 'zoom', 'pan', 'cinematic', 'motion', 'flowing', 'moving']):
                         final_prompt += ", very subtle camera movement, minimal motion, product focus"
 
-                generation_config = types.GenerateVideosConfig(
-                    aspect_ratio="16:9",
-                    negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
-                )
+                # Configuración para videos, con manejo especial para videos largos
+                import uuid
+                output_filename = f"veo_video_{uuid.uuid4().hex[:8]}.mp4"
+                
+                # Usar configuración de GCS si está disponible
+                output_storage_uri = None
+                if settings.gcs_bucket_name:
+                    output_storage_uri = generate_gcs_output_uri(
+                        bucket_name=settings.gcs_bucket_name,
+                        base_path=settings.gcs_output_path
+                    )
+                    logger.info(f"Usando GCS configurado: {output_storage_uri}")
+                
+                try:
+                    generation_config = types.GenerateVideosConfig(
+                        duration_seconds=base_duration,
+                        aspect_ratio="16:9",
+                        negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
+                    )
+                    
+                    # Agregar output_storage_uri si está disponible (para videos que lo requieran)
+                    if output_storage_uri:
+                        generation_config.output_gcs_uri = output_storage_uri
+                        logger.info(f"Configurado output_storage_uri: {output_storage_uri}")
+                
+                except Exception as config_error:
+                    logger.warning(f"Error configurando GCS, usando configuración básica: {config_error}")
+                    generation_config = types.GenerateVideosConfig(
+                        duration_seconds=base_duration,
+                        aspect_ratio="16:9",
+                        negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
+                    )
 
                 operation = self.client.models.generate_videos(
                     model=current_model,
@@ -742,12 +1036,112 @@ class GeminiService:
                 operation = self.client.operations.get(operation)
             
             if not hasattr(operation, 'response') or not operation.response:
-                raise Exception("Operación completada sin respuesta válida")
+                # Verificar errores específicos y obtener más información de debugging
+                error_detail = ""
+                operation_status = "unknown"
+                
+                if hasattr(operation, 'error') and operation.error:
+                    error_detail = str(operation.error)
+                    logger.error(f"Operation error details: {error_detail}")
+                    
+                    if "output storage uri is required" in error_detail.lower():
+                        raise Exception(
+                            f"Video demasiado grande para generación directa. Se requiere bucket GCS configurado. "
+                            f"Para videos de {duration_seconds}s, considera usar duraciones más cortas (4, 6 u 8 segundos) "
+                            f"o configurar un bucket de Google Cloud Storage. Error: {error_detail}"
+                        )
+                    elif "safety" in error_detail.lower() or "responsible ai" in error_detail.lower():
+                        raise Exception(
+                            f"Video rechazado por filtros de seguridad (Responsible AI). "
+                            f"Intenta modificar el prompt para ser menos específico sobre personas o marcas. "
+                            f"Error: {error_detail}"
+                        )
+                
+                # Obtener información adicional del estado de la operación
+                if hasattr(operation, 'metadata'):
+                    metadata_info = str(operation.metadata)
+                    logger.error(f"Operation metadata: {metadata_info}")
+                    error_detail += f" | Metadata: {metadata_info}"
+                
+                if hasattr(operation, 'done'):
+                    operation_status = f"done={operation.done}"
+                    logger.error(f"Operation status: {operation_status}")
+                
+                # Log completo para debugging
+                logger.error(f"Operation attributes: {dir(operation)}")
+                
+                raise Exception(f"Operación completada sin respuesta válida. Status: {operation_status}. {error_detail}")
                 
             if not hasattr(operation.response, 'generated_videos') or not operation.response.generated_videos:
                 raise Exception("No se generaron videos en la respuesta")
             
             generated_video = operation.response.generated_videos[0]
+            current_video_obj = generated_video.video
+            all_operation_ids = [operation.name]
+            total_blocks = 1
+            
+            # Si necesitamos extender el video, hacemos extensiones sucesivas
+            if needs_extension and num_extensions > 0:
+                # Verificar configuración de GCS antes de intentar extensiones
+                gcs_available = self.ensure_gcs_bucket()
+                if not gcs_available:
+                    logger.warning(f"Videos largos ({duration_seconds}s) requieren configuración de GCS.")
+                    logger.info("Devolviendo video base de 8s sin extensiones.")
+                    duration_seconds = base_duration  # Actualizar duración real
+                    needs_extension = False
+                    num_extensions = 0
+
+                if needs_extension and num_extensions > 0:
+                    logger.info(f"Iniciando {num_extensions} extensiones para alcanzar {duration_seconds}s totales")
+                
+                for ext_num in range(num_extensions):
+                    logger.info(f"Generando extensión {ext_num + 1}/{num_extensions}...")
+                    
+                    # Prompt para la extensión (continúa la narrativa)
+                    extension_prompt = f"{prompt} - Continuación {ext_num + 1}: Mostrando más detalles y características del producto, manteniendo coherencia visual."
+                    
+                    try:
+                        extension_result = await self.extend_video(
+                            previous_video_obj=current_video_obj,
+                            prompt=extension_prompt,
+                            extension_seconds=7,
+                            model_name=current_model,
+                            aspect_ratio=aspect_ratio
+                        )
+                        
+                        # Actualizar el video actual para la próxima extensión
+                        current_video_obj = extension_result["video"]
+                        all_operation_ids.append(extension_result["operation_id"])
+                        total_blocks += 1
+                        
+                        logger.info(f"Extensión {ext_num + 1} completada exitosamente")
+                        
+                    except Exception as ext_error:
+                        error_message = str(ext_error)
+                        logger.error(f"Error en extensión {ext_num + 1}: {error_message}")
+                        
+                        # Si el error es por falta de storage URI, ofrecer alternativa
+                        if "output storage uri is required" in error_message.lower():
+                            logger.warning(f"Extensión {ext_num + 1} falló por requerir GCS. Devolviendo video base de {base_duration}s")
+                            logger.info("Para videos más largos, configura un bucket de Google Cloud Storage")
+                            # No lanzar error, usar el video base
+                            break
+                        elif "supported durations are [7]" in error_message.lower():
+                            logger.error(f"Extensión {ext_num + 1} falló: Veo 3.1 requiere extensiones de 7s exactos")
+                            logger.info("Intenta con duraciones válidas: 8, 15, 22, 29, 36, 43, 50, 57, 64s")
+                            break
+                        else:
+                            raise Exception(f"Error en extensión {ext_num + 1}/{num_extensions}: {error_message}")
+                
+                # Si llegamos hasta aquí con extensiones exitosas
+                if total_blocks > 1:
+                    extension_total = (total_blocks - 1) * extension_duration
+                    logger.info(f"Video completo generado en {total_blocks} bloques: {base_duration}s base + {total_blocks - 1} extensiones de {extension_duration}s = {base_duration + extension_total}s total")
+                    # El video final es el último generado
+                    generated_video.video = current_video_obj
+                else:
+                    logger.info(f"Video generado solo con bloque base: {base_duration}s (extensiones fallaron)")
+                    duration_seconds = base_duration  # Actualizar duración real
             
             videos_generated_count = len(operation.response.generated_videos)
             
@@ -758,15 +1152,19 @@ class GeminiService:
             estimated_cost_usd = consumption_seconds * cost_per_second
             
             usage_metadata = {
-                "videos_requested": 1,  # Siempre se pide 1 video
+                "videos_requested": 1,  # Siempre se pide 1 video completo
                 "videos_generated": videos_generated_count,
                 "duration_per_video_seconds": duration_seconds,
                 "consumption_seconds": consumption_seconds,
                 "estimated_cost_usd": estimated_cost_usd,
                 "cost_per_second_usd": cost_per_second,
                 "source_images_count": len(processed_images),
-                "calculation_method": "real_count",
-                "note": "Consumo calculado basado en videos exitosamente generados"
+                "total_blocks": total_blocks if needs_extension else 1,
+                "base_duration": base_duration if needs_extension else duration_seconds,
+                "extensions_count": num_extensions if needs_extension else 0,
+                "all_operation_ids": all_operation_ids,
+                "calculation_method": "blocks" if needs_extension else "single",
+                "note": f"Video generado en {total_blocks} bloque(s)" if needs_extension else "Video generado en un solo bloque"
             }
             
             if hasattr(operation.response, 'usage_metadata') and operation.response.usage_metadata:
@@ -819,6 +1217,17 @@ class GeminiService:
             operation_uuid = operation.name.split('/')[-1] if '/' in operation.name else operation.name
             _video_cache[operation_uuid] = generated_video.video
             
+            # Generar URL firmada para el video desde imágenes
+            video_uri = generated_video.video.uri if hasattr(generated_video.video, 'uri') else None
+            signed_url = None
+            
+            if video_uri and video_uri.startswith('gs://'):
+                try:
+                    signed_url = generate_signed_url(video_uri, expiration_minutes=15)
+                    logger.info(f"URL firmada generada para video desde imágenes: {signed_url[:50]}...")
+                except Exception as e:
+                    logger.warning(f"No se pudo generar URL firmada para video desde imágenes: {e}")
+            
             # Persistir caché para debugging
             save_cache_to_disk()
             
@@ -826,13 +1235,19 @@ class GeminiService:
             
             return {
                 "video": generated_video.video,
-                "video_uri": generated_video.video.uri if hasattr(generated_video.video, 'uri') else None,
+                "video_uri": video_uri,
+                "signed_url": signed_url,
                 "operation_id": operation.name,
                 "metadata": metadata,
                 "image_count": len(processed_images),
                 "transitions": transitions_applied,
                 "usage": usage_metadata,
-                "message": f"Video cinematográfico generado exitosamente desde {len(processed_images)} imágenes con transiciones {transition_style}"
+                "message": f"Video cinematográfico generado exitosamente desde {len(processed_images)} imágenes con transiciones {transition_style}",
+                "download_info": {
+                    "gcs_uri": video_uri,
+                    "public_url": signed_url,
+                    "expires_in_minutes": 15 if signed_url else None
+                }
             }
             
         except ValueError as ve:
@@ -901,7 +1316,8 @@ class GeminiService:
     
     async def download_video(self, video_file, filename: str = "generated_video.mp4") -> bytes:
         """
-        Descarga un video generado por Veo usando Vertex AI
+        Descarga optimizada usando directamente el cliente de GCS
+        evitando problemas de 401 en buckets privados.
         
         Args:
             video_file: Objeto de archivo de video de Gemini
@@ -911,102 +1327,48 @@ class GeminiService:
             Bytes del video descargado
         """
         try:
-            if video_file is None:
-                raise ValueError("No se proporcionó archivo de video válido")
+            logger.info(f"Iniciando descarga nativa de GCS: {filename}")
             
-            logger.info(f"Descargando video usando Vertex AI: {filename}")
-            
-            # Para Vertex AI, intentar obtener la URI directamente
-            video_uri = None
-            
-            # Verificar diferentes atributos donde puede estar la URI
-            try:
-                if hasattr(video_file, 'uri'):
-                    uri_value = getattr(video_file, 'uri')
-                    if uri_value and isinstance(uri_value, str):
-                        video_uri = uri_value
-                        logger.info(f"URI obtenida de video_file.uri: {video_uri}")
-            except Exception as e:
-                logger.warning(f"Error accediendo a video_file.uri: {e}")
-            
-            # Intentar video_bytes directamente (es más directo para Vertex AI)
+            # 1. Obtener la URI
+            video_uri = getattr(video_file, 'uri', None)
             if not video_uri:
-                try:
-                    if hasattr(video_file, 'video_bytes'):
-                        video_bytes_attr = getattr(video_file, 'video_bytes')
-                        if video_bytes_attr and len(video_bytes_attr) > 0:
-                            logger.info(f"Video obtenido directamente desde video_bytes: {len(video_bytes_attr)} bytes")
-                            return video_bytes_attr
-                except Exception as e:
-                    logger.warning(f"Error accediendo a video_file.video_bytes: {e}")
-            
-            # Verificar otros atributos URI
+                # Intentar buscar en otros atributos si 'uri' falla
+                for attr in ['video_uri', 'file_uri', 'url']:
+                    video_uri = getattr(video_file, attr, None)
+                    if video_uri: break
+
             if not video_uri:
-                for attr_name in ['url', 'download_url', '_uri', 'path', 'file_uri', 'location', 'resource_name']:
-                    try:
-                        if hasattr(video_file, attr_name):
-                            attr_value = getattr(video_file, attr_name)
-                            if attr_value and isinstance(attr_value, str) and ('http' in attr_value or 'gs://' in attr_value):
-                                video_uri = attr_value
-                                logger.info(f"URI encontrada en {attr_name}: {video_uri}")
-                                break
-                    except Exception as e:
-                        logger.warning(f"Error accediendo a {attr_name}: {e}")
-                        continue
-            
-            if video_uri:
-                logger.info(f"Descargando desde URI: {video_uri}")
+                raise ValueError("No se encontró URI en el objeto de video")
+
+            # 2. Si es GCS, descargar usando el cliente nativo (sin requests.get)
+            if video_uri.startswith('gs://'):
+                # Parsear gs://bucket/blob_name
+                path_parts = video_uri.replace("gs://", "").split("/", 1)
+                bucket_name = path_parts[0]
+                blob_name = path_parts[1]
+
+                # Usar el cliente de Storage directamente
+                # Esto usa tus credenciales actuales (aunque sean de usuario) 
+                # y funcionará porque tienes permiso de lectura, sin necesitar firmar URL.
+                storage_client = storage.Client(project=settings.gemini_project_id)
+                bucket = storage_client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
                 
-                # Preparar headers para autenticación
-                headers = {}
-                if self.api_key and 'googleapis.com' in video_uri:
-                    headers['Authorization'] = f'Bearer {self.api_key}'
-                elif self.api_key:
-                    headers['x-goog-api-key'] = self.api_key
+                logger.info(f"Descargando blob {blob_name} del bucket {bucket_name}...")
+                video_bytes = blob.download_as_bytes()
                 
-                # Descargar el video
-                response = requests.get(video_uri, headers=headers, stream=True, timeout=300)
-                response.raise_for_status()
-                
-                video_data = response.content
-                logger.info(f"Video descargado exitosamente: {filename} ({len(video_data)} bytes)")
-                return video_data
-            
+                logger.info(f"Video descargado exitosamente ({len(video_bytes)} bytes)")
+                return video_bytes
+
             else:
-                # Si no hay URI ni video_bytes, intentar método save() como último recurso
-                logger.warning("No se encontró URI ni video_bytes, intentando método save()")
-                
-                if hasattr(video_file, 'save'):
-                    try:
-                        # Usar un nombre de archivo más simple para evitar problemas con directorios
-                        import time
-                        temp_filename = f"video_{int(time.time())}.mp4"
-                        temp_path = f"/tmp/{temp_filename}"
-                        
-                        logger.info(f"Intentando guardar video en: {temp_path}")
-                        video_file.save(temp_path)
-                        
-                        if os.path.exists(temp_path):
-                            with open(temp_path, 'rb') as f:
-                                video_data = f.read()
-                            
-                            os.remove(temp_path)  # Limpiar archivo temporal
-                            
-                            logger.info(f"Video descargado usando método save(): {filename} ({len(video_data)} bytes)")
-                            return video_data
-                        else:
-                            logger.error(f"El archivo {temp_path} no se creó correctamente")
-                    
-                    except Exception as save_error:
-                        logger.error(f"Error con método save(): {save_error}")
-                
-                raise Exception(f"No se pudo obtener la URI del video ni usar método save() para operation_id: {operation_id if 'operation_id' in locals() else 'desconocido'}. Atributos del video_file: {dir(video_file) if video_file else 'None'}")
-            
+                # Fallback para URIs que no son GCS (poco probable con Veo)
+                response = requests.get(video_uri, timeout=300)
+                response.raise_for_status()
+                logger.info(f"Video descargado desde URI no-GCS ({len(response.content)} bytes)")
+                return response.content
+
         except Exception as e:
-            logger.error(f"Error al descargar video: {str(e)}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response status: {e.response.status_code}")
-                logger.error(f"Response content: {e.response.text[:500]}")
+            logger.error(f"Error crítico descargando video: {str(e)}")
             raise Exception(f"Error al descargar video: {str(e)}")
         
     async def get_video_by_operation_id(self, operation_id: str) -> Any:
@@ -1061,16 +1423,56 @@ class GeminiService:
             logger.error(f"Error al recuperar video por operation_id: {str(e)}")
             return None
     
-    def validate_connection(self) -> bool:
+    def ensure_gcs_bucket(self) -> bool:
         """
-        Valida la conexión con Gemini
+        Verifica que existe configuración de GCS para almacenar videos grandes
         
         Returns:
-            True si la conexión es válida
+            True si hay configuración de GCS disponible
         """
         try:
-            models = list(genai.list_models())
-            return True
+            if not settings.gcs_bucket_name:
+                logger.warning("No se configuró GCS bucket. Videos largos pueden fallar.")
+                logger.info("Para configurar GCS bucket, agrega en .env:")
+                logger.info("GCS_BUCKET_NAME=tu-bucket-videos")
+                logger.info("GCS_OUTPUT_PATH=videos/generated/")
+                return False
+            
+            if not settings.gemini_project_id:
+                logger.warning("No se configuró GEMINI_PROJECT_ID. URLs firmadas pueden fallar.")
+                logger.info("Para configurar proyecto, agrega en .env:")
+                logger.info("GEMINI_PROJECT_ID=tu-google-project-id")
+                # No retornar False aquí, el bucket puede funcionar sin proyecto explícito
+            
+            # Verificar que el bucket sea válido
+            try:
+                if settings.gemini_project_id:
+                    storage_client = storage.Client(project=settings.gemini_project_id)
+                    logger.info(f"Verificando bucket con proyecto: {settings.gemini_project_id}")
+                else:
+                    storage_client = storage.Client()
+                    logger.info("Verificando bucket sin proyecto explícito")
+                    
+                bucket = storage_client.bucket(settings.gcs_bucket_name)
+                
+                # Intenta hacer una operación simple para verificar acceso
+                if not bucket.exists():
+                    logger.warning(f"Bucket '{settings.gcs_bucket_name}' no existe.")
+                    logger.info("Crea el bucket con: gsutil mb gs://tu-bucket-videos")
+                    return False
+                
+                logger.info(f"GCS bucket configurado correctamente: {settings.gcs_bucket_name}")
+                return True
+                
+            except Exception as bucket_error:
+                logger.warning(f"Error accediendo al bucket GCS '{settings.gcs_bucket_name}': {bucket_error}")
+                logger.info("Verifica que:")
+                logger.info("1. El bucket existe en Google Cloud Storage")
+                logger.info("2. Tienes permisos de acceso al bucket")
+                logger.info("3. Las credenciales de Google Cloud están configuradas")
+                logger.info("4. GEMINI_PROJECT_ID está configurado en .env")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error al validar conexión con Gemini: {str(e)}")
+            logger.error(f"Error verificando configuración GCS: {str(e)}")
             return False

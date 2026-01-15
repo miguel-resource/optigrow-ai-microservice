@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     gemini_location: str = "us-central1"
     gemini_vertexai: bool = False
     
+    # Google Cloud Storage Configuration (para videos largos)
+    gcs_bucket_name: str = ""  # Nombre del bucket sin gs://, ej: "mi-bucket-videos"
+    gcs_output_path: str = "videos/generated/"  # Ruta dentro del bucket
+    
     # CORS Settings
     allowed_origins: str = "http://localhost:8000"
     

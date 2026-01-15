@@ -215,9 +215,9 @@ class GenerateVideoFromImagesRequest(BaseModel):
         pattern="^(720p|1080p)$"
     )
     duration_seconds: int = Field(
-        default=8, 
+        default=15, 
         description="Duración total del video en segundos",
-        ge=4, le=30
+        ge=15, le=57
     )
     fps: int = Field(
         default=24, 
@@ -293,7 +293,7 @@ class GenerateVideoFromImagesRequest(BaseModel):
                 "transition_style": "smooth",
                 "aspect_ratio": "16:9",
                 "resolution": "720p",
-                "duration_seconds": 10,
+                "duration_seconds": 15,
                 "fps": 24,
                 "motion_strength": 0.8,
                 "zoom_effect": False,
@@ -329,7 +329,7 @@ class GenerateVideoFromImagesResponse(BaseModel):
                 "operation_id": "models/veo-3.1-generate-preview/operations/xyz789",
                 "metadata": {
                     "source_images": 3,
-                    "duration_seconds": 10,
+                    "duration_seconds": 15,
                     "fps": 24,
                     "resolution": "720p",
                     "aspect_ratio": "16:9",

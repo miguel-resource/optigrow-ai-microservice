@@ -127,7 +127,7 @@ Respuesta:
 ```
 
 **Parámetros de Video:**
-- `duration_seconds`: 4, 6, u 8 segundos
+- `duration_seconds`: 15, 22, 29, 36, 43, 50, 57 segundos
 - `resolution`: "720p" o "1080p" 
 - `aspect_ratio`: "16:9" o "9:16"
 - `reference_images`: Array de hasta 3 imágenes base64

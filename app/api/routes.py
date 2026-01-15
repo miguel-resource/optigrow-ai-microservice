@@ -268,7 +268,7 @@ async def generate_video_from_images(
     - **transition_style**: Estilo de transición (smooth, crossfade, morph, zoom, slide)
     - **aspect_ratio**: Relación de aspecto (16:9, 9:16, 1:1)
     - **resolution**: Resolución (720p, 1080p)
-    - **duration_seconds**: Duración total (4-30 segundos)
+    - **duration_seconds**: Duración total (15-57 segundos)
     - **fps**: Fotogramas por segundo (24, 30, 60)
     - **interpolation_frames**: Frames de interpolación (6-24)
     - **motion_strength**: Intensidad del movimiento (0.0-1.0)
