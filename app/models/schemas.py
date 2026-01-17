@@ -216,8 +216,8 @@ class GenerateVideoFromImagesRequest(BaseModel):
     )
     duration_seconds: int = Field(
         default=15, 
-        description="Duración total del video en segundos",
-        ge=15, le=57
+        description="Duración total del video en segundos (8, 15, 22, 29 o 58 - donde 58 = 2 segmentos concatenados)",
+        ge=8, le=58
     )
     fps: int = Field(
         default=24, 
@@ -264,6 +264,13 @@ class GenerateVideoFromImagesRequest(BaseModel):
     def validate_fps(cls, v):
         if v not in [24, 30, 60]:
             raise ValueError('fps debe ser 24, 30 o 60')
+        return v
+    
+    @field_validator('duration_seconds')
+    @classmethod
+    def validate_duration_seconds(cls, v):
+        if v not in [8, 15, 22, 29, 58]:
+            raise ValueError('duration_seconds debe ser 8, 15, 22, 29 o 58')
         return v
     
     @field_validator('pan_direction')

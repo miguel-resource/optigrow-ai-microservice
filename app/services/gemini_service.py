@@ -21,19 +21,19 @@ _video_cache: Dict[str, Any] = {}
 """
 GENERACIÓN DE VIDEOS CON VEO 3.1
 
-Límites importantes de la API:
-- Veo tiene un límite estricto de 4, 6 u 8 segundos por generación
-- IMPORTANTE: Las extensiones Video-to-Video pueden no estar disponibles en todos los modelos
-  Si las extensiones fallan, considera usar solo videos de 4, 6 u 8 segundos
+Límites importantes de la API (ACTUALIZADOS Enero 2026):
+- Veo tiene un límite estricto de 4, 6 u 8 segundos por generación base
+- NUEVO LÍMITE MÁXIMO: 30 segundos totales (incluidas extensiones)
+- CONCATENACIÓN: Videos de 58s mediante unión de 2 segmentos de 29s cada uno
 
 Duraciones soportadas actualmente:
-- Videos garantizados (1 bloque): 4, 6, 8 segundos
-- Videos experimentales (requieren extensiones): 16, 24, 32, 40, 48, 56, 64 segundos
-  NOTA: Las extensiones pueden fallar si el modelo no las soporta o por filtros de contenido
+- Videos simples: 8, 15, 22, 29 segundos (generación directa)
+- Videos concatenados: 58 segundos (2x 29s + FFmpeg automático)
 
 Métodos clave:
 - generate_video(): Generación base simple (4, 6 u 8s) - SIEMPRE FUNCIONA
-- generate_video_from_images(): Intenta manejar bloques para duraciones largas - EXPERIMENTAL
+- generate_video_from_images(): Para videos hasta 29s o concatenación automática para 58s
+- _generate_concatenated_video(): Manejo interno de videos largos con FFmpeg
 - extend_video(): Extiende un video existente - PUEDE NO ESTAR DISPONIBLE
 """
 
@@ -356,8 +356,8 @@ class GeminiService:
         reference_images: Optional[List] = None,
         first_frame: Optional[Any] = None,
         last_frame: Optional[Any] = None,
-        aspect_ratio: str = "16:9",
-        resolution: str = "720p",
+        aspect_ratio: str = "9:16",
+        resolution: str = "1080p",
         duration_seconds: int = 8,
         negative_prompt: Optional[str] = None,
         style: Optional[str] = None,
@@ -597,7 +597,7 @@ class GeminiService:
         prompt: str,
         extension_seconds: int = 7,
         model_name: str = "veo-3.1-generate-preview",
-        aspect_ratio: str = "16:9"
+        aspect_ratio: str = "9:16"
     ) -> Dict[str, Any]:
         """
         Extiende un video existente por 7 segundos adicionales usando Video-to-Video.
@@ -635,7 +635,8 @@ class GeminiService:
             # Configuración para extensiones que pueden requerir storage URI
             try:
                 extension_config = types.GenerateVideosConfig(
-                    duration_seconds=extension_seconds
+                    duration_seconds=extension_seconds,
+                    aspect_ratio=aspect_ratio
                 )
                 
                 # Agregar output_storage_uri si está disponible
@@ -764,8 +765,8 @@ class GeminiService:
         prompt: str,
         model_name: Optional[str] = "veo-3.1-generate-preview",
         transition_style: str = "smooth",
-        aspect_ratio: str = "16:9",
-        resolution: str = "720p",
+        aspect_ratio: str = "9:16",
+        resolution: str = "1080p",
         duration_seconds: int = 15,
         fps: int = 24,
         interpolation_frames: int = 8,
@@ -865,12 +866,13 @@ class GeminiService:
             if aspect_ratio not in valid_aspects:
                 raise ValueError(f"aspect_ratio debe ser uno de: {valid_aspects}")
             
-            # Duraciones totales permitidas (se generarán por bloques de 8s base + extensiones de 7s)
+            # Duraciones totales permitidas (ACTUALIZADO: máximo 30s + concatenación para 58s)
             # Base: 8s, Extensiones: 7s cada una
-            # Resultados posibles: 15 (8+7), 22 (8+7+7), 29 (8+7+7+7), etc.
-            valid_total_durations = [15, 22, 29, 36, 43, 50, 57]
+            # Simples: 8 (solo base), 15 (8+7), 22 (8+7+7), 29 (8+7+7+7)
+            # Concatenados: 58 (29s + 29s unidos automáticamente)
+            valid_total_durations = [8, 15, 22, 29, 58]
             if duration_seconds not in valid_total_durations:
-                raise ValueError(f"duration_seconds debe ser uno de: {valid_total_durations} (8s base + múltiplos de 7s)")
+                raise ValueError(f"duration_seconds debe ser uno de: {valid_total_durations} (58s = concatenación automática)")
             
             valid_fps = [24, 30, 60]
             if fps not in valid_fps:
@@ -885,7 +887,15 @@ class GeminiService:
             
             logger.info(f"Generando video desde {len(images)} imágenes - {duration_seconds}s")
             
-            # Determinar si necesitamos generar por bloques
+            # Detectar si necesitamos concatenación para videos largos (58s)
+            if duration_seconds == 58:
+                logger.info("Video de 58s detectado - usando concatenación de 2 segmentos de 29s")
+                return await self._generate_concatenated_video(
+                    images, prompt, 29, transition_style, aspect_ratio, 
+                    motion_strength, fps, interpolation_frames, pan_direction, model_name
+                )
+            
+            # Determinar si necesitamos generar por bloques (para videos <= 29s)
             base_duration = 8  # Duración del bloque base
             extension_duration = 7  # Duración de cada extensión (Veo 3.1 spec)
             needs_extension = duration_seconds > base_duration
@@ -895,6 +905,12 @@ class GeminiService:
                 # Calcular cuántas extensiones necesitamos
                 remaining_duration = duration_seconds - base_duration
                 num_extensions = remaining_duration // extension_duration
+                
+                # Validación crítica: verificar que el total no exceda 30s (límite de Google Veo API)
+                total_calculated = base_duration + (num_extensions * extension_duration)
+                if total_calculated > 30:
+                    raise ValueError(f"Duración calculada {total_calculated}s excede el límite máximo de 30s de Google Veo API. Usa una duración menor.")
+                
                 logger.info(f"Video largo detectado: {duration_seconds}s = {base_duration}s base + {num_extensions} extensiones de {extension_duration}s")
             
             # Procesar todas las imágenes
@@ -995,7 +1011,7 @@ class GeminiService:
                 try:
                     generation_config = types.GenerateVideosConfig(
                         duration_seconds=base_duration,
-                        aspect_ratio="16:9",
+                        aspect_ratio=aspect_ratio,
                         negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
                     )
                     
@@ -1008,7 +1024,7 @@ class GeminiService:
                     logger.warning(f"Error configurando GCS, usando configuración básica: {config_error}")
                     generation_config = types.GenerateVideosConfig(
                         duration_seconds=base_duration,
-                        aspect_ratio="16:9",
+                        aspect_ratio=aspect_ratio,
                         negative_prompt="low quality, distorted, deformed, ugly, blurry, grain, text, watermark, changed product, modified appearance, different product, altered features, fantasy elements, non-existent details, creative interpretation, artistic deviation from original"
                     )
 
@@ -1476,3 +1492,251 @@ class GeminiService:
         except Exception as e:
             logger.error(f"Error verificando configuración GCS: {str(e)}")
             return False
+
+    async def _generate_concatenated_video(
+        self,
+        images: List[Any],
+        base_prompt: str,
+        segment_duration: int = 29,
+        transition_style: str = "smooth",
+        aspect_ratio: str = "9:16",
+        motion_strength: float = 0.3,
+        fps: int = 24,
+        interpolation_frames: int = 12,
+        pan_direction: Optional[str] = None,
+        model_name: str = "veo-3.1-generate-preview"
+    ) -> Dict[str, Any]:
+        """
+        Genera un video largo concatenando múltiples segmentos de 29s
+        """
+        try:
+            import subprocess
+            import uuid
+            import shutil
+            
+            # Verificar que FFmpeg esté disponible
+            try:
+                ffmpeg_check = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+                if ffmpeg_check.returncode != 0:
+                    raise Exception("FFmpeg no está instalado o no está disponible en el PATH")
+                logger.info("FFmpeg detectado correctamente")
+            except FileNotFoundError:
+                raise Exception("FFmpeg no está instalado. Instálalo con: apt-get install ffmpeg (Linux) o brew install ffmpeg (macOS)")
+            except subprocess.TimeoutExpired:
+                raise Exception("FFmpeg no responde, verificar instalación")
+            
+            logger.info(f"Iniciando concatenación de video - 2 segmentos de {segment_duration}s")
+            
+            # Dividir imágenes en dos grupos para variedad
+            mid_point = len(images) // 2
+            images_segment1 = images[:mid_point] if mid_point > 0 else images
+            images_segment2 = images[mid_point:] if mid_point > 0 else images
+            
+            # Asegurar que cada segmento tenga al menos 2 imágenes
+            if len(images_segment1) < 2:
+                images_segment1 = images
+            if len(images_segment2) < 2:
+                images_segment2 = images
+                
+            logger.info(f"Segmento 1: {len(images_segment1)} imágenes, Segmento 2: {len(images_segment2)} imágenes")
+            
+            # Generar prompts diferenciados
+            segment1_prompt = f"{base_prompt} - Primera parte: Introducción del producto mostrando características principales y vista general."
+            segment2_prompt = f"{base_prompt} - Segunda parte: Detalles específicos, funcionalidades y ángulos complementarios del producto."
+            
+            logger.info("Generando segmento 1/2...")
+            segment1_result = await self.generate_video_from_images(
+                images=images_segment1,
+                prompt=segment1_prompt,
+                duration_seconds=segment_duration,
+                transition_style=transition_style,
+                aspect_ratio=aspect_ratio,
+                motion_strength=motion_strength,
+                fps=fps,
+                interpolation_frames=interpolation_frames,
+                pan_direction=pan_direction,
+                model_name=model_name
+            )
+            
+            logger.info("Generando segmento 2/2...")
+            segment2_result = await self.generate_video_from_images(
+                images=images_segment2,
+                prompt=segment2_prompt,
+                duration_seconds=segment_duration,
+                transition_style=transition_style,
+                aspect_ratio=aspect_ratio,
+                motion_strength=motion_strength,
+                fps=fps,
+                interpolation_frames=interpolation_frames,
+                pan_direction=pan_direction,
+                model_name=model_name
+            )
+            
+            # Descargar los videos temporalmente
+            logger.info("Descargando segmentos para concatenación...")
+            
+            video1_url = segment1_result.get('signed_url', '')
+            video2_url = segment2_result.get('signed_url', '')
+            
+            # Si no hay signed_url, intentar con video_uri pero convertir a HTTP
+            if not video1_url:
+                video1_uri = segment1_result.get('video_uri', '')
+                if video1_uri and video1_uri.startswith('gs://'):
+                    # Convertir gs:// a URL HTTP pública
+                    bucket_path = video1_uri.replace('gs://', '')
+                    video1_url = f"https://storage.googleapis.com/{bucket_path}"
+                else:
+                    video1_url = video1_uri
+                    
+            if not video2_url:
+                video2_uri = segment2_result.get('video_uri', '')
+                if video2_uri and video2_uri.startswith('gs://'):
+                    # Convertir gs:// a URL HTTP pública
+                    bucket_path = video2_uri.replace('gs://', '')
+                    video2_url = f"https://storage.googleapis.com/{bucket_path}"
+                else:
+                    video2_url = video2_uri
+            
+            if not video1_url or not video2_url:
+                raise Exception("No se pudieron obtener las URLs HTTP de los segmentos generados")
+            
+            logger.info(f"URLs de descarga - Segmento 1: {video1_url[:60]}... Segmento 2: {video2_url[:60]}...")
+            
+            # Crear archivos temporales
+            temp_dir = tempfile.mkdtemp()
+            video1_path = f"{temp_dir}/segment1.mp4"
+            video2_path = f"{temp_dir}/segment2.mp4"
+            output_path = f"{temp_dir}/concatenated.mp4"
+            filelist_path = f"{temp_dir}/filelist.txt"
+            
+            try:
+                # Descargar videos con reintentos
+                logger.info("Descargando segmento 1...")
+                max_download_retries = 3
+                for attempt in range(max_download_retries):
+                    try:
+                        video1_response = requests.get(video1_url, timeout=300)
+                        video1_response.raise_for_status()
+                        with open(video1_path, 'wb') as f:
+                            f.write(video1_response.content)
+                        logger.info(f"Segmento 1 descargado exitosamente ({len(video1_response.content)} bytes)")
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt < max_download_retries - 1:
+                            logger.warning(f"Error descargando segmento 1 (intento {attempt + 1}): {e}")
+                            time.sleep(2 ** attempt)  # Backoff exponencial
+                        else:
+                            raise Exception(f"Fallo descarga segmento 1 después de {max_download_retries} intentos: {e}")
+                
+                logger.info("Descargando segmento 2...")
+                for attempt in range(max_download_retries):
+                    try:
+                        video2_response = requests.get(video2_url, timeout=300)
+                        video2_response.raise_for_status()
+                        with open(video2_path, 'wb') as f:
+                            f.write(video2_response.content)
+                        logger.info(f"Segmento 2 descargado exitosamente ({len(video2_response.content)} bytes)")
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if attempt < max_download_retries - 1:
+                            logger.warning(f"Error descargando segmento 2 (intento {attempt + 1}): {e}")
+                            time.sleep(2 ** attempt)  # Backoff exponencial
+                        else:
+                            raise Exception(f"Fallo descarga segmento 2 después de {max_download_retries} intentos: {e}")
+                
+                # Crear lista de archivos para FFmpeg
+                with open(filelist_path, 'w') as f:
+                    f.write(f"file '{video1_path}'\n")
+                    f.write(f"file '{video2_path}'\n")
+                
+                # Concatenar con FFmpeg (comando optimizado)
+                logger.info("Concatenando videos con FFmpeg...")
+                ffmpeg_cmd = [
+                    'ffmpeg', '-y',  # Sobrescribir archivo de salida
+                    '-f', 'concat', 
+                    '-safe', '0', 
+                    '-i', filelist_path,
+                    '-c', 'copy',  # Copiar streams sin re-encodificar
+                    '-avoid_negative_ts', 'make_zero',  # Evitar problemas de timestamp
+                    output_path
+                ]
+                
+                logger.info(f"Comando FFmpeg: {' '.join(ffmpeg_cmd)}")
+                result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode != 0:
+                    logger.error(f"FFmpeg stdout: {result.stdout}")
+                    logger.error(f"FFmpeg stderr: {result.stderr}")
+                    raise Exception(f"Error en FFmpeg (código {result.returncode}): {result.stderr}")
+                
+                logger.info("Concatenación FFmpeg completada exitosamente")
+                
+                # Verificar que el archivo de salida existe y tiene contenido
+                if not os.path.exists(output_path):
+                    raise Exception("FFmpeg no generó el archivo de salida")
+                
+                output_size = os.path.getsize(output_path)
+                if output_size == 0:
+                    raise Exception("FFmpeg generó un archivo vacío")
+                    
+                logger.info(f"Video concatenado generado: {output_size} bytes")
+                
+                # Subir video concatenado a GCS
+                if settings.gcs_bucket_name:
+                    logger.info("Subiendo video concatenado a GCS...")
+                    
+                    storage_client = storage.Client()
+                    bucket = storage_client.bucket(settings.gcs_bucket_name)
+                    
+                    final_filename = f"video_concatenated_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
+                    blob_path = f"{settings.gcs_output_path}/{final_filename}"
+                    blob = bucket.blob(blob_path)
+                    
+                    with open(output_path, 'rb') as video_file:
+                        blob.upload_from_file(video_file, content_type='video/mp4')
+                    
+                    final_uri = f"gs://{settings.gcs_bucket_name}/{blob_path}"
+                    logger.info(f"Video concatenado subido: {final_uri}")
+                    
+                    # Generar URL firmada
+                    try:
+                        signed_url = generate_signed_url(final_uri)
+                        logger.info("URL firmada generada para video concatenado")
+                    except Exception:
+                        signed_url = f"https://storage.googleapis.com/{settings.gcs_bucket_name}/{blob_path}"
+                        logger.info("Usando URL pública para video concatenado")
+                    
+                    return {
+                        "operation_id": f"concat_{int(time.time())}_{uuid.uuid4().hex[:8]}",
+                        "video_uri": signed_url,
+                        "duration_seconds": segment_duration * 2,
+                        "concatenated": True,
+                        "segments": [
+                            {"uri": video1_url, "duration": segment_duration},
+                            {"uri": video2_url, "duration": segment_duration}
+                        ],
+                        "status": "completed"
+                    }
+                else:
+                    raise Exception("GCS bucket no configurado para concatenación")
+                    
+            finally:
+                # Limpiar archivos temporales de forma robusta
+                if temp_dir and os.path.exists(temp_dir):
+                    try:
+                        import shutil
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        logger.info(f"Directorio temporal eliminado: {temp_dir}")
+                    except Exception as e:
+                        logger.warning(f"Error limpiando archivos temporales en {temp_dir}: {e}")
+                        # Intentar limpiar archivos individuales como respaldo
+                        for temp_file in [video1_path, video2_path, filelist_path, output_path]:
+                            if temp_file and os.path.exists(temp_file):
+                                try:
+                                    os.remove(temp_file)
+                                except:
+                                    pass
+                    
+        except Exception as e:
+            logger.error(f"Error en concatenación de video: {e}")
+            raise Exception(f"Error generando video concatenado: {str(e)}")
