@@ -19,8 +19,54 @@ import tempfile
 import datetime
 from google.cloud import storage
 
+# Importar funciones de optimización de prompts desde módulo separado
+from app.services.prompt_optimizer import (
+    enhance_prompt_consistency,
+    detect_language,
+    optimize_prompt_for_reel,
+    get_text_overlay_specifications,
+    validate_text_readability_prompt,
+    get_narration_consistency_specs,
+    build_reel_enhanced_prompt,
+    build_showcase_enhanced_prompt,
+    get_final_restrictions,
+    build_extension_prompt
+)
+
+# Importar funciones de caché desde módulo separado
+from app.services.cache_service import (
+    get_video_cache,
+    add_to_cache,
+    get_from_cache,
+    save_cache_to_disk,
+    load_cache_from_disk,
+    ConcatenatedVideo,
+    LocalConcatenatedVideo
+)
+
+# Importar funciones de almacenamiento GCS desde módulo separado
+from app.services.storage_service import (
+    download_video_from_gcs,
+    generate_signed_url,
+    generate_gcs_output_uri,
+    gcs_uri_to_https_url,
+    upload_video_to_gcs,
+    get_storage_client
+)
+
+# Importar funciones de procesamiento de video desde módulo separado
+from app.services.video_processor import (
+    check_ffmpeg_available,
+    download_video_segment,
+    concatenate_videos_ffmpeg,
+    get_video_url_from_result,
+    process_concatenated_video
+)
+
 logger = logging.getLogger(__name__)
-_video_cache: Dict[str, Any] = {}
+
+# Referencia al caché global (ahora manejado por cache_service)
+_video_cache = get_video_cache()
 
 """
 GENERACIÓN DE VIDEOS CON VEO 3.1
@@ -40,217 +86,6 @@ Métodos clave:
 - _generate_concatenated_video(): Manejo interno de videos largos con FFmpeg
 - extend_video(): Extiende un video existente - PUEDE NO ESTAR DISPONIBLE
 """
-
-# Función para persistir caché temporalmente
-def save_cache_to_disk():
-    """Guarda el caché actual en disco para debugging"""
-    try:
-        cache_data = {}
-        for key, video in _video_cache.items():
-            cache_data[key] = {
-                "type": str(type(video)),
-                "has_uri": hasattr(video, 'uri'),
-                "uri": getattr(video, 'uri', None) if hasattr(video, 'uri') else None,
-                "timestamp": time.time()
-            }
-        
-        with open('/tmp/video_cache_debug.json', 'w') as f:
-            json.dump(cache_data, f, indent=2)
-        
-        logger.info(f"Caché guardado en disco: {len(cache_data)} videos")
-    except Exception as e:
-        logger.error(f"Error guardando caché: {e}")
-
-def load_cache_from_disk():
-    """Intenta cargar caché desde disco para debugging"""
-    try:
-        with open('/tmp/video_cache_debug.json', 'r') as f:
-            cache_data = json.load(f)
-        
-        logger.info(f"Caché cargado desde disco: {len(cache_data)} videos")
-        return cache_data
-    except Exception as e:
-        logger.warning(f"No se pudo cargar caché desde disco: {e}")
-        return {}
-
-def download_video_from_gcs(gcs_uri: str, output_path: str) -> bool:
-    """
-    Descarga un video directamente desde GCS usando las credenciales configuradas
-    
-    Args:
-        gcs_uri: URI del video en formato gs://bucket/path/video.mp4
-        output_path: Ruta local donde guardar el video
-        
-    Returns:
-        True si la descarga fue exitosa, False si falló
-    """
-    try:
-        if not gcs_uri or not gcs_uri.startswith('gs://'):
-            logger.error(f"URI GCS inválida: {gcs_uri}")
-            return False
-        
-        # Extraer bucket y blob name
-        path_parts = gcs_uri.replace("gs://", "").split("/", 1)
-        if len(path_parts) != 2:
-            logger.error(f"Formato de URI GCS inválido: {gcs_uri}")
-            return False
-        
-        bucket_name = path_parts[0]
-        blob_name = path_parts[1]
-        
-        logger.info(f"Descargando desde GCS: bucket={bucket_name}, blob={blob_name}")
-        
-        # Usar cliente GCS con credenciales configuradas
-        if settings.gemini_project_id:
-            storage_client = storage.Client(project=settings.gemini_project_id)
-        else:
-            storage_client = storage.Client()
-        
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        # Verificar que el blob existe
-        if not blob.exists():
-            logger.error(f"El video no existe en GCS: {gcs_uri}")
-            return False
-        
-        # Descargar el video
-        blob.download_to_filename(output_path)
-        
-        # Verificar que se descargó correctamente
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info(f"Video descargado exitosamente: {os.path.getsize(output_path)} bytes")
-            return True
-        else:
-            logger.error("La descarga de GCS resultó en un archivo vacío o inexistente")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error descargando desde GCS: {e}")
-        return False
-
-
-def generate_signed_url(gcs_uri: str, expiration_minutes: int = 15) -> str:
-    """
-    Genera una URL firmada temporal para un video almacenado en Google Cloud Storage
-    
-    Args:
-        gcs_uri: URI del formato gs://bucket/path/video.mp4
-        expiration_minutes: Tiempo de expiración en minutos (default: 15)
-        
-    Returns:
-        URL firmada temporal para acceder al video
-        
-    Raises:
-        Exception: Si hay errores al generar la URL firmada
-    """
-    try:
-        if not gcs_uri or not gcs_uri.startswith('gs://'):
-            raise ValueError(f"URI inválida, debe empezar con 'gs://': {gcs_uri}")
-        
-        # Convertimos gs://bucket/path/video.mp4 -> bucket, path/video.mp4
-        path_parts = gcs_uri.replace("gs://", "").split("/", 1)
-        if len(path_parts) != 2:
-            raise ValueError(f"Formato de URI GCS inválido: {gcs_uri}")
-        
-        bucket_name = path_parts[0]
-        blob_name = path_parts[1]
-        
-        logger.info(f"Generando URL firmada para: bucket={bucket_name}, blob={blob_name}")
-        
-        # Crear cliente de Google Cloud Storage con proyecto explícito
-        try:
-            if settings.gemini_project_id:
-                storage_client = storage.Client(project=settings.gemini_project_id)
-                logger.info(f"Usando proyecto explícito: {settings.gemini_project_id}")
-            else:
-                storage_client = storage.Client()
-                logger.warning("No se configuró GEMINI_PROJECT_ID, usando proyecto por defecto")
-        except Exception as client_error:
-            logger.error(f"Error creando cliente GCS: {client_error}")
-            raise Exception(f"Error configurando cliente GCS: {client_error}")
-        
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        
-        # Verificar que el blob existe
-        if not blob.exists():
-            logger.warning(f"El video no existe en GCS: {gcs_uri}")
-            # No lanzar error, permitir que el sistema continúe
-            return None
-        
-        # Generar URL firmada válida por el tiempo especificado
-        try:
-            url = blob.generate_signed_url(
-                version="v4",
-                expiration=datetime.timedelta(minutes=expiration_minutes),
-                method="GET",
-            )
-            
-            logger.info(f"URL firmada generada exitosamente (expira en {expiration_minutes}min)")
-            return url
-            
-        except Exception as signing_error:
-            error_msg = str(signing_error).lower()
-            
-            # Error específico de credenciales
-            if "private key" in error_msg or "service account" in error_msg:
-                logger.warning(f"No se pueden firmar URLs con credenciales actuales: {signing_error}")
-                logger.info("Para URLs firmadas, configura Service Account. Ver SERVICE_ACCOUNT_SETUP.md")
-                logger.info("Alternativa temporal: Hacer bucket público con 'gsutil iam ch allUsers:objectViewer gs://ai_microservice_videos'")
-                
-                # Devolver URL pública si el objeto es accesible públicamente
-                try:
-                    public_url = f"https://storage.googleapis.com/{bucket_name}/{blob_name}"
-                    logger.info(f"Intentando URL pública: {public_url}")
-                    return public_url
-                except:
-                    return None
-            else:
-                logger.error(f"Error firmando URL: {signing_error}")
-                return None
-        
-    except Exception as e:
-        logger.error(f"Error generando URL firmada para {gcs_uri}: {str(e)}")
-        # No lanzar excepción, devolver None para permitir fallback
-        return None
-
-def generate_gcs_output_uri(bucket_name: str, base_path: str = "videos/generated/") -> str:
-    """
-    Genera una URI de salida para almacenar videos en Google Cloud Storage
-    
-    Args:
-        bucket_name: Nombre del bucket (sin gs://)
-        base_path: Ruta base dentro del bucket
-        
-    Returns:
-        URI completa de GCS en formato gs://bucket/path/video_timestamp.mp4
-    """
-    try:
-        if not bucket_name:
-            raise ValueError("bucket_name no puede estar vacío")
-        
-        import uuid
-        import time
-        
-        # Generar nombre único del archivo
-        timestamp = int(time.time())
-        unique_id = str(uuid.uuid4())[:8]
-        filename = f"video_{timestamp}_{unique_id}.mp4"
-        
-        # Asegurar que base_path termina con /
-        if base_path and not base_path.endswith('/'):
-            base_path += '/'
-        
-        # Construir URI completa
-        gcs_uri = f"gs://{bucket_name}/{base_path}{filename}"
-        
-        logger.info(f"URI de salida GCS generada: {gcs_uri}")
-        return gcs_uri
-        
-    except Exception as e:
-        logger.error(f"Error generando URI de salida GCS: {str(e)}")
-        raise Exception(f"Error generando URI de salida: {str(e)}")
 
 
 class GeminiService:
@@ -422,7 +257,7 @@ class GeminiService:
         duration_seconds: int = 8,
         negative_prompt: Optional[str] = None,
         style: Optional[str] = None,
-        motion_strength: float = 0.5,
+        motion_strength: float = 0.3,
         seed: Optional[int] = None
     ) -> Dict[str, Any]:
         """
@@ -658,10 +493,11 @@ class GeminiService:
         prompt: str,
         extension_seconds: int = 7,
         model_name: str = "veo-3.1-generate-preview",
-        aspect_ratio: str = "9:16"
+        aspect_ratio: str = "9:16",
+        dynamic_camera_changes: bool = True
     ) -> Dict[str, Any]:
         """
-        Extiende un video existente por 7 segundos adicionales usando Video-to-Video.
+        Extiende un video existente por 7 segundos adicionales con cambios dinámicos de cámara.
         
         Args:
             previous_video_obj: Objeto de video de Gemini retornado por generación anterior
@@ -669,6 +505,7 @@ class GeminiService:
             extension_seconds: Duración de la extensión (solo 7 segundos soportado en Veo 3.1)
             model_name: Modelo Veo a utilizar
             aspect_ratio: Debe coincidir con el video original
+            dynamic_camera_changes: Aplicar cambios de toma y ángulos (default: True)
             
         Returns:
             Dict con información del video extendido
@@ -835,20 +672,25 @@ class GeminiService:
         images: List[Union[str, Any]],
         prompt: str,
         model_name: Optional[str] = "veo-3.1-generate-preview",
-        transition_style: str = "dynamic",
+        transition_style: str = "smooth",
         aspect_ratio: str = "9:16",
         resolution: str = "1080p",
         duration_seconds: int = 15,
         fps: int = 30,
-        interpolation_frames: int = 6,
-        motion_strength: float = 0.7,
-        zoom_effect: bool = True,
-        pan_direction: Optional[str] = "random",
+        interpolation_frames: int = 8,
+        motion_strength: float = 0.4,
+        zoom_effect: bool = False,
+        pan_direction: Optional[str] = "subtle_left",
         fade_transitions: bool = True,
         audio_sync: bool = True,
-        style: Optional[str] = "social_media",
+        style: Optional[str] = "reel_optimized",
         seed: Optional[int] = None,
-        use_nano_banana: bool = False
+        use_nano_banana: bool = True,
+        is_product_showcase: bool = True,
+        maintain_context: bool = True,
+        add_narration: bool = True,
+        text_overlays: bool = True,
+        dynamic_camera_changes: bool = True
     ) -> Dict[str, Any]:
         """
         Genera un video cinematográfico a partir de una secuencia de imágenes
@@ -876,19 +718,25 @@ class GeminiService:
                                   - Nota: Videos largos toman más tiempo (~10-15 min por bloque/extensión)
             fps (int): Fotogramas por segundo (24, 30, 60) (default: 24)
             interpolation_frames (int): Frames de interpolación entre imágenes (6-16) (default: 8)
-                                       Valores bajos (6-10) mantienen fidelidad al producto.
+                                       Valores optimizados para reels: 6-10 mantienen calidad del producto
                                        Valores altos (12-16) pueden generar contenido interpolado no deseado.
-            motion_strength (float): Intensidad del movimiento aplicado (0.0-1.0) (default: 0.3)
-                                   Valores bajos (0.1-0.4) mantienen fidelidad al producto.
-                                   Valores altos (0.6-1.0) pueden generar contenido no relacionado.
+            motion_strength (float): Intensidad del movimiento aplicado (0.0-1.0) (default: 0.4)
+                                   Valores optimizados para reels: 0.3-0.5 mantienen coherencia del producto
+                                   Valores altos (0.6-1.0) pueden generar contenido inconsistente
             zoom_effect (bool): Aplicar efecto de zoom sutil en cada imagen (default: False)
-            pan_direction (Optional[str]): Dirección de paneo ("left", "right", "up", "down", None)
+                              Deshabilitado por defecto para mejor coherencia en reels
+            pan_direction (Optional[str]): Dirección de paneo optimizada para reels
+                                         "subtle_left", "subtle_right", "gentle_up", "gentle_down", None
             fade_transitions (bool): Usar fundidos suaves entre transiciones (default: True)
-            audio_sync (bool): Sincronizar con audio (requiere audio_track) (default: False)
-            style (Optional[str]): Estilo cinematográfico ("cinematic", "documentary", "artistic")
+            audio_sync (bool): Sincronizar con audio mejorado (default: True)
+            style (Optional[str]): Estilo optimizado: "reel_optimized", "product_showcase", "social_media"
             seed (Optional[int]): Semilla para reproducibilidad
-            use_nano_banana (bool): Usar Nano Banana para generar imagen de referencia (default: True)
-                                   Si es False, usa directamente las imágenes del usuario
+            use_nano_banana (bool): Usar Nano Banana para coherencia visual (default: True)
+            is_product_showcase (bool): Optimizar para showcase de productos (default: True)
+            maintain_context (bool): Mantener coherencia entre segmentos (default: True)
+            add_narration (bool): Incluir narración continua y envolvente (default: True)
+            text_overlays (bool): Agregar texto dynamic_camera_changesque aparece dinámicamente (default: True)
+            dynamic_camera_changes (bool): Usar cambios de cámara en extensiones (default: True)
         
         Returns:
             Dict[str, Any]: Información completa del video generado:
@@ -918,6 +766,17 @@ class GeminiService:
             ```
         """
         try:
+            logger.info(f"Iniciando generación de video estilo reel desde {len(images)} imágenes")
+            
+            # Optimizar prompt para estética de reel
+            if maintain_context:
+                # Detectar idioma del prompt para mantener consistencia
+                detected_language = detect_language(prompt)
+                optimized_prompt = optimize_prompt_for_reel(prompt, is_product_showcase, add_narration, text_overlays, detected_language)
+                logger.info(f"Prompt optimizado para coherencia, narración y estética de reel con idioma: {detected_language}")
+            else:
+                optimized_prompt = prompt
+            
             # Validación exhaustiva de parámetros
             if not images or len(images) < 2:
                 raise ValueError("Se requieren al menos 2 imágenes para generar un video")
@@ -952,7 +811,7 @@ class GeminiService:
             if interpolation_frames < 6 or interpolation_frames > 24:
                 raise ValueError("interpolation_frames debe estar entre 6 y 24")
             
-            valid_pan_directions = ["left", "right", "up", "down", None]
+            valid_pan_directions = ["subtle_left", "subtle_right", "gentle_up", "gentle_down", None]
             if pan_direction not in valid_pan_directions:
                 raise ValueError(f"pan_direction debe ser uno de: {valid_pan_directions[:-1]} o None")
             
@@ -962,8 +821,9 @@ class GeminiService:
             if duration_seconds == 58:
                 logger.info("Video de 58s detectado - usando concatenación de 2 segmentos de 29s")
                 return await self._generate_concatenated_video(
-                    images, prompt, 29, transition_style, aspect_ratio, 
-                    motion_strength, fps, interpolation_frames, pan_direction, model_name
+                    images, optimized_prompt, 29, transition_style, aspect_ratio, 
+                    motion_strength, fps, interpolation_frames, pan_direction, model_name,
+                    is_product_showcase, maintain_context, add_narration, text_overlays, dynamic_camera_changes
                 )
             
             # Determinar si necesitamos generar por bloques (para videos <= 29s)
@@ -998,65 +858,113 @@ class GeminiService:
             
             time_per_image = duration_seconds / len(processed_images)
             
-            # Determinar si es contenido tipo reel basado en parámetros
+            # Determinar si es contenido tipo reel basado en parámetros y configurar dinámicas de cámara
             is_reel_content = (style == "social_media" or aspect_ratio == "9:16" or 
                              duration_seconds >= 15 or "reel" in prompt.lower() or 
-                             "tiktok" in prompt.lower() or "instagram" in prompt.lower())
+                             "tiktok" in prompt.lower() or "instagram" in prompt.lower() or
+                             style == "reel_optimized")
+            
+            # Configurar movimiento de cámara basado en dynamic_camera_changes
+            camera_movement = "dynamic" if dynamic_camera_changes else "static"
+            logger.info(f"Configuración de cámara: {camera_movement}, Contenido reel: {is_reel_content}")
             
             if is_reel_content:
                 # Prompt optimizado para contenido tipo reel/social media
+                detected_language = "spanish" if any(word in optimized_prompt.lower() for word in ['producto', 'este', 'con', 'para', 'de', 'la', 'el']) else "english"
+                
                 enhanced_prompt = f"""
-                Crear un REEL/VIDEO CORTO de {duration_seconds} segundos estilo Instagram/TikTok que muestre este producto
-                usando estas {len(processed_images)} imágenes. {prompt}
+                REEL PROFESIONAL: Crear video {duration_seconds}s estilo Instagram/TikTok optimizado para móviles
+                usando estas {len(processed_images)} imágenes del producto. {optimized_prompt}
                 
                 ESTILO REEL OPTIMIZADO:
-                - Ritmo dinámico y engaging que mantenga atención
-                - Transiciones {transition_style} rápidas pero fluidas 
-                - Movimiento constante pero controlado ({time_per_image:.1f}s por imagen)
-                - Estética moderna y vibrante para redes sociales
-                - Música/audio que complemente el concepto principal
+                - Estética moderna y atractiva para redes sociales
+                - Movimientos cinematográficos suaves y profesionales  
+                - Iluminación y contraste optimizados para dispositivos móviles
+                - Transiciones fluidas {transition_style} que mantengan engagement ({time_per_image:.1f}s por imagen)
+                - Audio continuo y sincronizado sin cortes ni distorsión
+                - Composición vertical perfecta para formato 9:16
+                - CÁMARA DINÁMICA: {"Cambios de ángulo y perspectiva" if dynamic_camera_changes else "Movimientos suaves y constantes"}
+                - NARRACIÓN CONTINUA EN {detected_language.upper()}: Voz envolvente que explique el producto durante todo el video
+                - TEXTO DINÁMICO LEGIBLE EN {detected_language.upper()}: 
+                  * Overlays con ALTO CONTRASTE (texto blanco sobre fondos oscuros o viceversa)
+                  * Tamaño de fuente GRANDE y CLARO para móviles (mínimo 24pt equivalente)
+                  * Tipografía BOLD y fácil de leer (Arial, Helvetica, sans-serif)
+                  * Posición estratégica que no interfiera con el producto
+                  * Duración suficiente para lectura (mínimo 3 segundos por texto)
+                  * Animaciones suaves de entrada y salida
+                - ELEMENTOS VISUALES: Textos destacados, títulos llamativos, información del producto
                 
-                COHERENCIA NARRATIVA TOTAL:
-                - MANTENER el tema principal "{prompt}" en TODO el video
-                - Cada segmento debe conectar naturalmente con el anterior
-                - Evitar cambios abruptos de contexto, música o estilo
-                - Preservar el mensaje central a través de extensiones
+                COHERENCIA Y CONTINUIDAD:
+                - MANTENER tema principal "{optimized_prompt}" en TODO el video
+                - Audio limpio y continuo entre segmentos (sin cortes abruptos)
+                - Cada segmento conecta naturalmente con el anterior
+                - Preservar mensaje central y estilo visual consistente
+                - Transiciones suaves que no rompan el flujo narrativo
+                - IDIOMA CONSISTENTE: Solo {detected_language.upper()} durante todo el video
+                - NARRACIÓN SIN REPETICIONES: Pronunciación clara y fluida
+                - NO cambiar de idioma en ningún momento del video
                 
-                PRODUCTO Y FIDELIDAD:
+                FIDELIDAD DEL PRODUCTO:
                 - Mostrar EXACTAMENTE el producto de las imágenes proporcionadas
                 - Mantener características, colores, forma y detalles específicos
                 - NO inventar elementos que no estén en las imágenes originales
                 - Aplicar efectos sin distorsionar la apariencia real del producto
                 """
             else:
-                # Prompt tradicional para videos no-reel
+                # Prompt tradicional para videos no-reel optimizado para mejor audio y coherencia
                 enhanced_prompt = f"""
-                Crear un video promocional de {duration_seconds} segundos que muestre EXACTAMENTE este producto específico 
-                usando estas {len(processed_images)} imágenes del producto. {prompt}
+                SHOWCASE PROFESIONAL: Crear video promocional de {duration_seconds} segundos estilo reel 
+                usando estas {len(processed_images)} imágenes del producto. {optimized_prompt}
                 
-                IMPORTANTE: El video debe mostrar únicamente el producto real de las imágenes proporcionadas, 
-                manteniendo EXACTAMENTE sus características, colores, forma, textura y todos los detalles específicos.
-                NO inventar ni añadir elementos, características o detalles que no estén en las imágenes originales.
-                NO cambiar la apariencia, forma, o características del producto durante transiciones o zooms.
-                Mantener absoluta fidelidad visual al producto mostrado en las imágenes.
+                AUDIO Y ESTÉTICA:
+                - Audio continuo y sin cortes para mejor experiencia 
+                - NARRACIÓN PROFESIONAL: Voz clara que describe el producto durante todo el video
+                - TEXTO INFORMATIVO CLARO:
+                  * Overlays con MÁXIMO CONTRASTE para perfecta legibilidad
+                  * Fuente GRANDE y BOLD optimizada para dispositivos móviles
+                  * Texto NÍTIDO sin pixelación ni borrosidad
+                  * Posicionamiento que no obstruya el producto principal
+                  * Información concisa y fácil de leer rápidamente
+                  * Colores contrastantes (blanco/negro, amarillo/negro)
+                - MOVIMIENTO DE CÁMARA: {"Dinámico con cambios de perspectiva" if dynamic_camera_changes else "Suave y consistente"}
+                - Calidad profesional optimizada para redes sociales
+                - Transiciones suaves que mantengan engagement
+                - Movimientos cinematográficos controlados
                 
-                Transiciones {transition_style} suaves y conservadoras entre cada imagen ({time_per_image:.1f}s por imagen).
-                Evitar movimientos bruscos o efectos que puedan distorsionar la apariencia del producto.
+                FIDELIDAD DEL PRODUCTO: 
+                Mantener EXACTAMENTE las características, colores, forma y textura del producto real.
+                NO inventar ni modificar elementos. Mostrar únicamente lo que aparece en las imágenes.
+                
+                Transiciones {transition_style} optimizadas para reel ({time_per_image:.1f}s por imagen).
+                Audio sincronizado y de alta calidad.
                 """
             
             if zoom_effect:
                 enhanced_prompt += "\n- Aplicar zoom MUY sutil y controlado (máximo 10% de cambio) manteniendo EXACTAMENTE la integridad y apariencia del producto. NO inventar detalles durante el zoom."
             
             if pan_direction:
-                enhanced_prompt += f"\n- Movimiento de cámara hacia {pan_direction} de forma muy suave y conservadora, sin distorsionar el producto."
+                camera_instruction = f"Movimiento de cámara {pan_direction} {'dinámico y variado' if dynamic_camera_changes else 'suave y profesional'}, optimizado para reel."
+                enhanced_prompt += f"\n- {camera_instruction}"
             
             if fade_transitions:
-                enhanced_prompt += "\n- Usar fundidos muy suaves para transiciones elegantes entre imágenes, manteniendo consistencia visual del producto."
+                enhanced_prompt += "\n- Transiciones suaves y elegantes que mantengan el flujo del reel."
             
-            if style:
-                enhanced_prompt = f"[{style.upper()} CINEMATOGRAPHY] {enhanced_prompt}"
+            if style and style != "reel_optimized":
+                enhanced_prompt = f"[{style.upper()} REEL] {enhanced_prompt}"
             
-            enhanced_prompt += "\n\nMantener coherencia visual, fluidez temporal y continuidad narrativa.\n\nRESTRICCIONES CRÍTICAS:\n- NO crear, inventar o añadir elementos que no estén en las imágenes originales\n- NO modificar la forma, color, textura o características del producto\n- NO generar fondos, objetos o elementos adicionales no presentes en las imágenes\n- Mantener absoluta fidelidad al producto real mostrado en las imágenes de referencia\n- Priorizar la precisión visual sobre la creatividad artística"
+            # Agregar especificaciones técnicas para texto legible
+            if text_overlays:
+                text_specs = get_text_overlay_specifications(aspect_ratio)
+                enhanced_prompt += f"\n\n{text_specs}"
+            
+            # Agregar especificaciones de narración consistente
+            if add_narration:
+                detected_language = detect_language(optimized_prompt)
+                narration_specs = get_narration_consistency_specs(detected_language)
+                enhanced_prompt += f"\n\n{narration_specs}"
+            
+            # Agregar restricciones finales usando función del módulo de optimización
+            enhanced_prompt += get_final_restrictions(dynamic_camera_changes)
             
             current_model = model_name if model_name else "veo-3.1-generate-preview"
             reference_image_obj = None
@@ -1091,12 +999,14 @@ class GeminiService:
                 )
                 
                 if not enhanced_prompt or not isinstance(enhanced_prompt, str):
-                    final_prompt = "Subtle camera movement showcasing product details, high quality, 4k"
+                    final_prompt = "Professional product showcase with smooth movement, continuous narration, LARGE HIGH-CONTRAST text overlays, crystal clear typography, high quality, 4k, social media ready"
                 else:
-                    final_prompt = enhanced_prompt
-                    # Solo añadir movimiento si no hay instrucciones específicas y es necesario
-                    if not any(word in final_prompt.lower() for word in ['movement', 'zoom', 'pan', 'cinematic', 'motion', 'flowing', 'moving']):
-                        final_prompt += ", very subtle camera movement, minimal motion, product focus"
+                    # Validar legibilidad del texto antes del envío
+                    validated_prompt = validate_text_readability_prompt(enhanced_prompt, aspect_ratio)
+                    final_prompt = validated_prompt
+                    # Añadir elementos específicos para texto legible si no están presentes
+                    if not any(word in final_prompt.lower() for word in ['legible', 'contrast', 'readable', 'clear']):
+                        final_prompt += ", LARGE LEGIBLE text overlays with HIGH CONTRAST, readable typography, crystal clear text"
 
                 # Configuración para videos, con manejo especial para videos largos
                 import uuid
@@ -1216,14 +1126,23 @@ class GeminiService:
                 for ext_num in range(num_extensions):
                     logger.info(f"Generando extensión {ext_num + 1}/{num_extensions}...")
                     
-                    # Prompt optimizado para la extensión manteniendo contexto reel
-                    if is_reel_content:
-                        # Prompt MUY simplificado para evitar filtros de seguridad
-                        core_theme = prompt.split('.')[0].strip()[:50]  # Limitar longitud
-                        extension_prompt = f"Continue showing {core_theme}. Smooth transition, same style, product focus."
+                    # Prompt optimizado para la extensión manteniendo contexto reel con cambios dinámicos
+                    detected_language = "spanish" if any(word in optimized_prompt.lower() for word in ['producto', 'este', 'con', 'para', 'de', 'la', 'el']) else "english"
+                    
+                    if dynamic_camera_changes:
+                        if is_reel_content:
+                            # Prompt con cambio de cámara para contenido reel
+                            core_theme = optimized_prompt.split('.')[0].strip()[:50]
+                            extension_prompt = f"Continue {core_theme}. DYNAMIC CAMERA CHANGE: Close-up details, new angle, smooth transition. Maintain {detected_language} narration and text overlays. NO language switching."
+                        else:
+                            # Prompt tradicional con cambio de cámara
+                            extension_prompt = f"Continue product showcase. CAMERA TRANSITION: New perspective, detailed view, same {detected_language} narration flow, consistent text elements. NO language mixing."
                     else:
-                        # Prompt tradicional simplificado para extensiones no-reel
-                        extension_prompt = f"Continue product showcase. Smooth transition, same visual style."
+                        if is_reel_content:
+                            core_theme = optimized_prompt.split('.')[0].strip()[:50]
+                            extension_prompt = f"Continue showing {core_theme}. Smooth transition, same style, maintain {detected_language} narration. CONSISTENT LANGUAGE."
+                        else:
+                            extension_prompt = f"Continue product showcase. Smooth transition, same visual style, continuous {detected_language} narration. NO repetitions."
                     
                     try:
                         extension_result = await self.extend_video(
@@ -1231,7 +1150,8 @@ class GeminiService:
                             prompt=extension_prompt,
                             extension_seconds=7,
                             model_name=current_model,
-                            aspect_ratio=aspect_ratio
+                            aspect_ratio=aspect_ratio,
+                            dynamic_camera_changes=dynamic_camera_changes
                         )
                         
                         # Actualizar el video actual para la próxima extensión
@@ -1638,28 +1558,32 @@ class GeminiService:
         images: List[Any],
         base_prompt: str,
         segment_duration: int = 29,
-        transition_style: str = "dynamic",
+        transition_style: str = "smooth",
         aspect_ratio: str = "9:16",
-        motion_strength: float = 0.6,
+        motion_strength: float = 0.4,
         fps: int = 30,
         interpolation_frames: int = 8,
-        pan_direction: Optional[str] = "random",
-        model_name: str = "veo-3.1-generate-preview"
+        pan_direction: Optional[str] = "subtle_left",
+        model_name: str = "veo-3.1-generate-preview",
+        is_product_showcase: bool = True,
+        maintain_context: bool = True,
+        add_narration: bool = True,
+        text_overlays: bool = True,
+        dynamic_camera_changes: bool = True
     ) -> Dict[str, Any]:
         """
-        Genera un video largo concatenando múltiples segmentos de 29s
+        Genera un video largo (hasta 58s) concatenando múltiples segmentos con coherencia mejorada
+        
+        Optimizado para:
+        - Estética de reel/Instagram
+        - Coherencia visual entre segmentos  
+        - Mejor manejo del audio
+        - Transiciones suaves
+        - Presentación profesional de productos
         """
         try:
             # Verificar que FFmpeg esté disponible
-            try:
-                ffmpeg_check = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
-                if ffmpeg_check.returncode != 0:
-                    raise Exception("FFmpeg no está instalado o no está disponible en el PATH")
-                logger.info("FFmpeg detectado correctamente")
-            except FileNotFoundError:
-                raise Exception("FFmpeg no está instalado. Instálalo con: apt-get install ffmpeg (Linux) o brew install ffmpeg (macOS)")
-            except subprocess.TimeoutExpired:
-                raise Exception("FFmpeg no responde, verificar instalación")
+            check_ffmpeg_available()
             
             logger.info(f"Iniciando concatenación de video - 2 segmentos de {segment_duration}s")
             
@@ -1676,21 +1600,32 @@ class GeminiService:
                 
             logger.info(f"Segmento 1: {len(images_segment1)} imágenes, Segmento 2: {len(images_segment2)} imágenes")
             
-            # Detectar si es contenido tipo reel para prompts optimizados
-            is_reel_content = ("reel" in base_prompt.lower() or "tiktok" in base_prompt.lower() or 
-                             "instagram" in base_prompt.lower() or aspect_ratio == "9:16")
-            
-            if is_reel_content:
-                # Prompts ultra-simplificados para evitar filtros de seguridad
-                core_theme = base_prompt.split('.')[0].strip()[:30]  # Muy limitado
+            # Aplicar optimización de coherencia entre segmentos
+            if maintain_context:
+                # Usar función de coherencia para prompts mejorados
+                segment1_prompt = enhance_prompt_consistency(
+                    base_prompt=base_prompt,
+                    segment_number=1,
+                    total_segments=2,
+                    previous_context="",
+                    dynamic_camera_changes=dynamic_camera_changes,
+                    maintain_language=True
+                )
                 
-                segment1_prompt = f"Show {core_theme} - first part. Dynamic video, smooth transitions."
-                segment2_prompt = f"Show {core_theme} - second part. Continue same style, complete story."
+                segment2_prompt = enhance_prompt_consistency(
+                    base_prompt=base_prompt,
+                    segment_number=2, 
+                    total_segments=2,
+                    previous_context="primer segmento con showcasing del producto y narración introductoria en el mismo idioma",
+                    dynamic_camera_changes=dynamic_camera_changes,
+                    maintain_language=True
+                )
             else:
-                # Prompts tradicionales simplificados
-                segment1_prompt = f"Product showcase - part 1. Professional presentation."
-                segment2_prompt = f"Product showcase - part 2. Complete demonstration."
+                # Prompts tradicionales simplificados 
+                segment1_prompt = f"Professional product showcase - part 1: {base_prompt[:50]}"
+                segment2_prompt = f"Professional product showcase - part 2: {base_prompt[:50]}"
             
+            # Generar segmentos de video
             logger.info("Generando segmento 1/2...")
             segment1_result = await self.generate_video_from_images(
                 images=images_segment1,
@@ -1703,7 +1638,12 @@ class GeminiService:
                 interpolation_frames=interpolation_frames,
                 pan_direction=pan_direction,
                 model_name=model_name,
-                style="social_media" if is_reel_content else None
+                style="reel_optimized" if is_product_showcase else "social_media",
+                is_product_showcase=is_product_showcase,
+                maintain_context=maintain_context,
+                add_narration=add_narration,
+                text_overlays=text_overlays,
+                dynamic_camera_changes=dynamic_camera_changes
             )
             
             logger.info("Generando segmento 2/2...")
@@ -1718,356 +1658,26 @@ class GeminiService:
                 interpolation_frames=interpolation_frames,
                 pan_direction=pan_direction,
                 model_name=model_name,
-                style="social_media" if is_reel_content else None
+                style="reel_optimized" if is_product_showcase else "social_media",
+                is_product_showcase=is_product_showcase,
+                maintain_context=maintain_context,
+                add_narration=add_narration,
+                text_overlays=text_overlays,
+                dynamic_camera_changes=dynamic_camera_changes
             )
             
-            # Descargar los videos temporalmente
-            logger.info("Descargando segmentos para concatenación...")
-            
-            video1_url = segment1_result.get('signed_url', '')
-            video2_url = segment2_result.get('signed_url', '')
-            
-            # Si no hay signed_url, intentar con video_uri pero convertir a HTTP
-            if not video1_url:
-                video1_uri = segment1_result.get('video_uri', '')
-                if video1_uri and video1_uri.startswith('gs://'):
-                    # Convertir gs:// a URL HTTP pública
-                    bucket_path = video1_uri.replace('gs://', '')
-                    video1_url = f"https://storage.googleapis.com/{bucket_path}"
-                else:
-                    video1_url = video1_uri
-                    
-            if not video2_url:
-                video2_uri = segment2_result.get('video_uri', '')
-                if video2_uri and video2_uri.startswith('gs://'):
-                    # Convertir gs:// a URL HTTP pública
-                    bucket_path = video2_uri.replace('gs://', '')
-                    video2_url = f"https://storage.googleapis.com/{bucket_path}"
-                else:
-                    video2_url = video2_uri
-            
-            if not video1_url or not video2_url:
-                raise Exception("No se pudieron obtener las URLs HTTP de los segmentos generados")
-            
-            logger.info(f"URLs de descarga - Segmento 1: {video1_url[:60]}... Segmento 2: {video2_url[:60]}...")
-            
-            # Crear archivos temporales
-            temp_dir = tempfile.mkdtemp()
-            video1_path = f"{temp_dir}/segment1.mp4"
-            video2_path = f"{temp_dir}/segment2.mp4"
-            output_path = f"{temp_dir}/concatenated.mp4"
-            filelist_path = f"{temp_dir}/filelist.txt"
-            
-            try:
-                # Descargar videos con reintentos y manejo mejorado de errores GCS
-                logger.info("Descargando segmento 1...")
-                max_download_retries = 3
-                segment1_downloaded = False
-                
-                for attempt in range(max_download_retries):
-                    try:
-                        video1_response = requests.get(video1_url, timeout=300)
-                        video1_response.raise_for_status()
-                        with open(video1_path, 'wb') as f:
-                            f.write(video1_response.content)
-                        logger.info(f"Segmento 1 descargado exitosamente ({len(video1_response.content)} bytes)")
-                        segment1_downloaded = True
-                        break
-                    except requests.exceptions.RequestException as e:
-                        if attempt < max_download_retries - 1:
-                            logger.warning(f"Error descargando segmento 1 (intento {attempt + 1}): {e}")
-                            # Si es error 403, intentar descarga directa desde GCS
-                            if ("403" in str(e) or "Forbidden" in str(e)) and 'video_uri' in segment1_result:
-                                logger.warning("Error 403 - intentando descarga directa desde GCS...")
-                                gcs_uri = segment1_result.get('video_uri', '')
-                                if gcs_uri.startswith('gs://'):
-                                    if download_video_from_gcs(gcs_uri, video1_path):
-                                        logger.info("Segmento 1 descargado exitosamente desde GCS directo")
-                                        segment1_downloaded = True
-                                        break
-                            time.sleep(2 ** attempt)  # Backoff exponencial
-                        else:
-                            # Último intento: intentar descarga directa como fallback final
-                            if 'video_uri' in segment1_result:
-                                gcs_uri = segment1_result.get('video_uri', '')
-                                if gcs_uri.startswith('gs://'):
-                                    logger.warning("Último intento: descarga directa desde GCS...")
-                                    if download_video_from_gcs(gcs_uri, video1_path):
-                                        logger.info("Segmento 1 descargado en último intento desde GCS")
-                                        segment1_downloaded = True
-                                        break
-                            
-                            if not segment1_downloaded:
-                                raise Exception(f"Fallo descarga segmento 1 después de {max_download_retries} intentos: {e}")
-                
-                logger.info("Descargando segmento 2...")
-                segment2_downloaded = False
-                
-                for attempt in range(max_download_retries):
-                    try:
-                        video2_response = requests.get(video2_url, timeout=300)
-                        video2_response.raise_for_status()
-                        with open(video2_path, 'wb') as f:
-                            f.write(video2_response.content)
-                        logger.info(f"Segmento 2 descargado exitosamente ({len(video2_response.content)} bytes)")
-                        segment2_downloaded = True
-                        break
-                    except requests.exceptions.RequestException as e:
-                        if attempt < max_download_retries - 1:
-                            logger.warning(f"Error descargando segmento 2 (intento {attempt + 1}): {e}")
-                            # Si es error 403, intentar descarga directa desde GCS
-                            if ("403" in str(e) or "Forbidden" in str(e)) and 'video_uri' in segment2_result:
-                                logger.warning("Error 403 - intentando descarga directa desde GCS...")
-                                gcs_uri = segment2_result.get('video_uri', '')
-                                if gcs_uri.startswith('gs://'):
-                                    if download_video_from_gcs(gcs_uri, video2_path):
-                                        logger.info("Segmento 2 descargado exitosamente desde GCS directo")
-                                        segment2_downloaded = True
-                                        break
-                            time.sleep(2 ** attempt)  # Backoff exponencial
-                        else:
-                            # Último intento: intentar descarga directa como fallback final
-                            if 'video_uri' in segment2_result:
-                                gcs_uri = segment2_result.get('video_uri', '')
-                                if gcs_uri.startswith('gs://'):
-                                    logger.warning("Último intento: descarga directa desde GCS...")
-                                    if download_video_from_gcs(gcs_uri, video2_path):
-                                        logger.info("Segmento 2 descargado en último intento desde GCS")
-                                        segment2_downloaded = True
-                                        break
-                            
-                            if not segment2_downloaded:
-                                raise Exception(f"Fallo descarga segmento 2 después de {max_download_retries} intentos: {e}")
-                
-                # Crear lista de archivos para FFmpeg
-                with open(filelist_path, 'w') as f:
-                    f.write(f"file '{video1_path}'\n")
-                    f.write(f"file '{video2_path}'\n")
-                
-                # Concatenar con FFmpeg (comando optimizado)
-                logger.info("Concatenando videos con FFmpeg...")
-                ffmpeg_cmd = [
-                    'ffmpeg', '-y',  # Sobrescribir archivo de salida
-                    '-f', 'concat', 
-                    '-safe', '0', 
-                    '-i', filelist_path,
-                    '-c', 'copy',  # Copiar streams sin re-encodificar
-                    '-avoid_negative_ts', 'make_zero',  # Evitar problemas de timestamp
-                    output_path
-                ]
-                
-                logger.info(f"Comando FFmpeg: {' '.join(ffmpeg_cmd)}")
-                result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
-                
-                if result.returncode != 0:
-                    logger.error(f"FFmpeg stdout: {result.stdout}")
-                    logger.error(f"FFmpeg stderr: {result.stderr}")
-                    raise Exception(f"Error en FFmpeg (código {result.returncode}): {result.stderr}")
-                
-                logger.info("Concatenación FFmpeg completada exitosamente")
-                
-                # Verificar que el archivo de salida existe y tiene contenido
-                if not os.path.exists(output_path):
-                    raise Exception("FFmpeg no generó el archivo de salida")
-                
-                output_size = os.path.getsize(output_path)
-                if output_size == 0:
-                    raise Exception("FFmpeg generó un archivo vacío")
-                    
-                logger.info(f"Video concatenado generado: {output_size} bytes")
-                
-                # Subir video concatenado a GCS
-                if settings.gcs_bucket_name:
-                    logger.info("Subiendo video concatenado a GCS...")
-                    
-                    # Crear cliente con project ID explícito
-                    if settings.gemini_project_id:
-                        storage_client = storage.Client(project=settings.gemini_project_id)
-                        logger.info(f"Usando proyecto para upload: {settings.gemini_project_id}")
-                    else:
-                        storage_client = storage.Client()
-                        logger.warning("No hay project ID configurado - usando credenciales por defecto")
-                    
-                    bucket = storage_client.bucket(settings.gcs_bucket_name)
-                    
-                    final_filename = f"video_concatenated_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
-                    blob_path = f"{settings.gcs_output_path}/{final_filename}"
-                    blob = bucket.blob(blob_path)
-                    
-                    try:
-                        with open(output_path, 'rb') as video_file:
-                            blob.upload_from_file(video_file, content_type='video/mp4')
-                        
-                        final_uri = f"gs://{settings.gcs_bucket_name}/{blob_path}"
-                        logger.info(f"Video concatenado subido exitosamente: {final_uri}")
-                        
-                        # Agregar video concatenado al caché para descarga posterior
-                        concat_operation_id = f"concat_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-                        
-                        # Crear un objeto mock para el caché (similar a los videos de Gemini)
-                        class ConcatenatedVideo:
-                            def __init__(self, uri):
-                                self.uri = uri
-                                self.gcs_uri = uri
-                        
-                        _video_cache[concat_operation_id] = ConcatenatedVideo(final_uri)
-                        logger.info(f"Video concatenado añadido al caché: {concat_operation_id}")
-                        
-                        # Generar URL firmada
-                        try:
-                            signed_url = generate_signed_url(final_uri)
-                            logger.info("URL firmada generada para video concatenado")
-                        except Exception as url_error:
-                            logger.warning(f"Error generando URL firmada: {url_error}")
-                            signed_url = f"https://storage.googleapis.com/{settings.gcs_bucket_name}/{blob_path}"
-                            logger.info("Usando URL pública para video concatenado")
-                        
-                        return {
-                            "operation_id": concat_operation_id,
-                            "video_uri": signed_url,
-                            "duration_seconds": segment_duration * 2,
-                            "concatenated": True,
-                            "image_count": len(images),
-                            "transitions": [
-                                {"type": "dynamic", "duration": 1.5, "description": "Transición dinámica entre segmentos"},
-                                {"type": "smooth", "duration": 1.0, "description": "Transición suave al final"}
-                            ],
-                            "message": f"Video de {segment_duration * 2}s generado exitosamente mediante concatenación",
-                            "metadata": {
-                                "resolution": "1080p",
-                                "fps": fps,
-                                "aspect_ratio": aspect_ratio,
-                                "transition_style": transition_style,
-                                "motion_strength": motion_strength,
-                                "segments_count": 2,
-                                "concatenation_method": "ffmpeg"
-                            },
-                            "segments": [
-                                {"uri": video1_url, "duration": segment_duration},
-                                {"uri": video2_url, "duration": segment_duration}
-                            ],
-                            "status": "completed"
-                        }
-                        
-                    except Exception as upload_error:
-                        logger.error(f"Error subiendo video concatenado a GCS: {upload_error}")
-                        
-                        # Si falla la subida, devolver el video local como fallback
-                        logger.warning("Fallback: devolviendo video local sin subir a GCS")
-                        
-                        # Crear una respuesta alternativa con el video local
-                        local_video_size = os.path.getsize(output_path)
-                        logger.info(f"Video concatenado disponible localmente: {local_video_size} bytes")
-                        
-                        # Agregar al caché para descarga posterior
-                        concat_operation_id = f"concat_local_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-                        
-                        class LocalConcatenatedVideo:
-                            def __init__(self, local_path):
-                                self.uri = f"file://{local_path}"
-                                self.local_path = local_path
-                        
-                        _video_cache[concat_operation_id] = LocalConcatenatedVideo(output_path)
-                        logger.info(f"Video concatenado local añadido al caché: {concat_operation_id}")
-                        
-                        return {
-                            "operation_id": concat_operation_id,
-                            "video_uri": f"file://{output_path}",
-                            "duration_seconds": segment_duration * 2,
-                            "concatenated": True,
-                            "local_file": True,
-                            "image_count": len(images),
-                            "transitions": [
-                                {"type": "dynamic", "duration": 1.5, "description": "Transición dinámica entre segmentos"},
-                                {"type": "smooth", "duration": 1.0, "description": "Transición suave al final"}
-                            ],
-                            "message": f"Video de {segment_duration * 2}s generado localmente (error en upload a GCS)",
-                            "metadata": {
-                                "resolution": "1080p",
-                                "fps": fps,
-                                "aspect_ratio": aspect_ratio,
-                                "transition_style": transition_style,
-                                "motion_strength": motion_strength,
-                                "segments_count": 2,
-                                "concatenation_method": "ffmpeg",
-                                "local_storage": True
-                            },
-                            "segments": [
-                                {"uri": video1_url, "duration": segment_duration},
-                                {"uri": video2_url, "duration": segment_duration}
-                            ],
-                            "status": "completed",
-                            "note": "Video disponible localmente debido a error en upload a GCS"
-                        }
-                else:
-                    # Si no hay configuración de GCS, devolver video local
-                    logger.warning("GCS bucket no configurado - devolviendo video concatenado local")
-                    
-                    local_video_size = os.path.getsize(output_path)
-                    logger.info(f"Video concatenado disponible localmente: {local_video_size} bytes")
-                    
-                    # Mover el video a una ubicación más permanente (opcional)
-                    permanent_path = f"/tmp/concatenated_video_{int(time.time())}_{uuid.uuid4().hex[:8]}.mp4"
-                    shutil.copy2(output_path, permanent_path)
-                    
-                    # Agregar al caché para descarga posterior
-                    concat_operation_id = f"concat_local_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-                    
-                    class LocalConcatenatedVideo:
-                        def __init__(self, local_path):
-                            self.uri = f"file://{local_path}"
-                            self.local_path = local_path
-                    
-                    _video_cache[concat_operation_id] = LocalConcatenatedVideo(permanent_path)
-                    logger.info(f"Video concatenado local añadido al caché: {concat_operation_id}")
-                    
-                    return {
-                        "operation_id": concat_operation_id,
-                        "video_uri": f"file://{permanent_path}",
-                        "duration_seconds": segment_duration * 2,
-                        "concatenated": True,
-                        "local_file": True,
-                        "image_count": len(images),
-                        "transitions": [
-                            {"type": "dynamic", "duration": 1.5, "description": "Transición dinámica entre segmentos"},
-                            {"type": "smooth", "duration": 1.0, "description": "Transición suave al final"}
-                        ],
-                        "message": f"Video de {segment_duration * 2}s generado localmente (GCS no configurado)",
-                        "metadata": {
-                            "resolution": "1080p",
-                            "fps": fps,
-                            "aspect_ratio": aspect_ratio,
-                            "transition_style": transition_style,
-                            "motion_strength": motion_strength,
-                            "segments_count": 2,
-                            "concatenation_method": "ffmpeg",
-                            "local_storage": True,
-                            "gcs_configured": False
-                        },
-                        "segments": [
-                            {"uri": video1_url, "duration": segment_duration},
-                            {"uri": video2_url, "duration": segment_duration}
-                        ],
-                        "status": "completed",
-                        "note": "Video concatenado disponible localmente"
-                    }
-                    
-            finally:
-                # Limpiar archivos temporales de forma robusta
-                if temp_dir and os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                        logger.info(f"Directorio temporal eliminado: {temp_dir}")
-                    except Exception as e:
-                        logger.warning(f"Error limpiando archivos temporales en {temp_dir}: {e}")
-                        # Intentar limpiar archivos individuales como respaldo
-                        for temp_file in [video1_path, video2_path, filelist_path, output_path]:
-                            if temp_file and os.path.exists(temp_file):
-                                try:
-                                    os.remove(temp_file)
-                                except:
-                                    pass
+            # Usar la función de procesamiento de video para concatenar
+            return process_concatenated_video(
+                segment_results=[segment1_result, segment2_result],
+                segment_duration=segment_duration,
+                fps=fps,
+                aspect_ratio=aspect_ratio,
+                transition_style=transition_style,
+                motion_strength=motion_strength,
+                total_images=len(images)
+            )
                     
         except Exception as e:
             logger.error(f"Error en concatenación de video: {e}")
             raise Exception(f"Error generando video concatenado: {str(e)}")
+
