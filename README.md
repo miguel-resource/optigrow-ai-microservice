@@ -11,6 +11,21 @@ Microservicio en Python para consumir modelos de IA (Google Gemini) desde Larave
 - **Uvicorn** - Servidor ASGI de alto rendimiento
 - **Pytest** - Framework de testing
 
+## Autenticación con Google Cloud (Vertex AI)
+
+Para usar Vertex AI con Gemini, debes autenticarte con Google Cloud CLI:
+
+### 1. Autenticarte con tu cuenta de Google
+
+```bash
+gcloud auth login
+```
+
+### 2. Configurar el proyecto de Google Cloud
+
+```bash
+gcloud config set project TU_PROJECT_ID
+```
 
 ## Documentación
 
@@ -187,25 +202,30 @@ optigrow-ai-microservice/
 │   ├── __init__.py
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── auth.py          # Middleware de autenticación
-│   │   └── routes.py        # Endpoints de la API
+│   │   ├── auth.py              # Middleware de autenticación
+│   │   └── routes.py            # Endpoints de la API
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── schemas.py       # Modelos Pydantic
+│   │   └── schemas.py           # Modelos Pydantic
 │   └── services/
 │       ├── __init__.py
-│       ├── base_service.py  # Clase base abstracta
-│       ├── gemini_service.py # Implementación de Gemini
-│       └── model_factory.py  # Factory pattern
+│       ├── cache_service.py     # Servicio de caché de videos
+│       ├── gemini_service.py    # Implementación de Gemini
+│       ├── prompt_optimizer.py  # Optimización de prompts
+│       ├── storage_service.py   # Integración con Google Cloud Storage
+│       └── video_processor.py   # Procesamiento y concatenación de videos
 ├── config/
 │   ├── __init__.py
-│   └── settings.py          # Configuración de la app
+│   └── settings.py              # Configuración de la app
 ├── tests/
-│   └── ...                  # Tests unitarios
-├── .env.example             # Variables de entorno de ejemplo
+│   ├── __init__.py
+│   ├── test_gemini_service.py   # Tests del servicio Gemini
+│   └── test_video_generation.py # Tests de generación de video
+├── .env                         # Variables de entorno (no incluir en git)
+├── .env.example                 # Variables de entorno de ejemplo
 ├── .gitignore
-├── main.py                  # Punto de entrada
-├── requirements.txt         # Dependencias
+├── main.py                      # Punto de entrada
+├── requirements.txt             # Dependencias
 └── README.md
 ```
 
