@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
+import io
 from app.models.schemas import (
     GenerateRequest, 
     GenerateResponse, 
@@ -251,6 +253,7 @@ async def download_video(
     responses={
         400: {"model": ErrorResponse},
         403: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
         500: {"model": ErrorResponse}
     },
     tags=["AI Models"]
@@ -261,28 +264,11 @@ async def generate_video_from_images(
 ):
     """
     Genera un video cinematográfico a partir de una secuencia de imágenes
-    
-    - **images**: Lista de imágenes (URLs o base64, mínimo 2, máximo 10)
-    - **prompt**: Descripción narrativa que conecta las imágenes
-    - **model**: Modelo Veo a utilizar
-    - **transition_style**: Estilo de transición (smooth, crossfade, morph, zoom, slide)
-    - **aspect_ratio**: Relación de aspecto (16:9, 9:16, 1:1)
-    - **resolution**: Resolución (720p, 1080p)
-    - **duration_seconds**: Duración total (15-57 segundos)
-    - **fps**: Fotogramas por segundo (24, 30, 60)
-    - **interpolation_frames**: Frames de interpolación (6-24)
-    - **motion_strength**: Intensidad del movimiento (0.0-1.0)
-    - **zoom_effect**: Aplicar efecto zoom
-    - **pan_direction**: Dirección de paneo (left, right, up, down)
-    - **fade_transitions**: Usar fundidos suaves
-    - **style**: Estilo cinematográfico (cinematic, documentary, artistic)
-    - **seed**: Semilla para reproducibilidad
-    - **download_directly**: Si retorna el archivo directamente
     """
     try:
         logger.info(f"Solicitud de generación de video desde {len(request.images)} imágenes")
         logger.info(f"Estilo: {request.transition_style}, Duración: {request.duration_seconds}s, FPS: {request.fps}")
-        logger.info(f"Prompt: {request.prompt[:100]}...")
+        logger.info(f"Style: {request.style}, Prompt: {request.prompt[:100]}...")
         
         service = GeminiService(api_key=settings.gemini_api_key)
         
@@ -355,10 +341,71 @@ async def generate_video_from_images(
             detail=f"Error de validación: {str(ve)}"
         )
     except Exception as e:
-        logger.error(f"Error al generar video desde imágenes: {str(e)}")
+        error_str = str(e)
+        logger.error(f"Error al generar video desde imágenes: {error_str}")
+        
+        # Detectar error específico de políticas de Vertex AI
+        if "violates Vertex AI's usage guidelines" in error_str or "usage guidelines" in error_str:
+            logger.warning(f"Contenido rechazado por políticas de Vertex AI. Intentando solución alternativa...")
+            
+            # Intentar generar video con configuración más conservadora
+            try:
+                # Usar menos imágenes (las primeras 3-4) y prompt más neutro
+                fallback_images = request.images[:4]  # Usar solo las primeras 4 imágenes
+                fallback_prompt = f"Presentación profesional del producto mostrado en las imágenes"
+                
+                logger.info(f"Reintentando con {len(fallback_images)} imágenes y prompt neutro...")
+                
+                service = GeminiService(api_key=settings.gemini_api_key)
+                result = await service.generate_video_from_images(
+                    images=fallback_images,
+                    prompt=fallback_prompt,
+                    model_name=request.model,
+                    transition_style="smooth",  # Solo transición básica
+                    aspect_ratio=request.aspect_ratio,
+                    resolution=request.resolution,
+                    duration_seconds=8,  # Reducir duración para evitar extensiones problemáticas
+                    fps=request.fps,
+                    interpolation_frames=6,  # Mínimo
+                    motion_strength=0.1,  # Movimiento mínimo
+                    zoom_effect=False,
+                    pan_direction=None,
+                    fade_transitions=True,
+                    style="cinematic",  # Estilo más conservador
+                    seed=request.seed
+                )
+                
+                logger.info(f"Video generado exitosamente con configuración alternativa: {result['operation_id']}")
+                
+                return GenerateVideoFromImagesResponse(
+                    success=True,
+                    model=request.model,
+                    video_uri=None,
+                    operation_id=result["operation_id"],
+                    metadata=result["metadata"],
+                    image_count=result["image_count"],
+                    transitions=result["transitions"],
+                    usage=result.get("usage"),
+                    download_url=f"http://localhost:8000/api/v1/download-video/{result['operation_id']}",
+                    message=f"Video generado con configuración alternativa debido a restricciones de contenido. {result['message']}"
+                )
+                
+            except Exception as fallback_error:
+                logger.error(f"Error en intento de recuperación: {str(fallback_error)}")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error": "Contenido no permitido",
+                        "message": "Las imágenes proporcionadas no cumplen con las políticas de contenido de Vertex AI.",
+                        "suggestion": "Intenta con imágenes diferentes del producto o verifica que las imágenes no contengan contenido médico, personal o sensible.",
+                        "technical_details": error_str
+                    }
+                )
+        
+        # Error genérico
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al generar video desde imágenes: {str(e)}"
+            detail=f"Error al generar video desde imágenes: {error_str}"
         )
 
 

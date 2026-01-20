@@ -110,7 +110,7 @@ def optimize_prompt_for_reel(
     language: str = "spanish"
 ) -> str:
     """
-    Optimiza el prompt para crear contenido con estética de reel/Instagram
+    Optimiza el prompt para crear contenido natural tipo reel con personas reales
     
     Args:
         prompt: Prompt original del usuario
@@ -120,57 +120,86 @@ def optimize_prompt_for_reel(
         language: Idioma para mantener consistencia (default: spanish)
         
     Returns:
-        Prompt optimizado para estética de reel
+        Prompt optimizado para reel natural con personas
     """
     try:
-        # Prefijos para estética de reel
-        reel_style_prefix = "Cinematic vertical video with dynamic movement, "
+        # Prompt base para reel natural con personas reales
+        base_reel_prompt = f"REEL NATURAL VERTICAL 9:16: {prompt}. "
         
-        if is_product_showcase:
-            product_prefix = "Professional product showcase with smooth camera movements, perfect lighting, "
-            prompt = f"{product_prefix}{prompt}"
-        
-        # Agregar elementos de estética de reel
-        reel_elements = [
-            "high contrast visuals",
-            "dynamic camera angles", 
-            "smooth transitions",
-            "vibrant colors",
-            "professional lighting",
-            "engaging composition",
-            "social media ready"
+        # Elementos de autenticidad y naturalidad
+        authenticity_elements = [
+            "Persona real (NO AI obvio) demostrando el producto auténticamente",
+            "Iluminación natural, ambiente real",
+            "Movimientos de cámara SUAVES y naturales",
+            "Audio consistente con volumen estable",
+            "Expresiones genuinas y creíbles"
         ]
         
-        # Elementos de narración y texto
-        narrative_elements = []
+        # Elementos específicos para showcase de producto
+        if is_product_showcase:
+            product_elements = [
+                "Mostrar EXACTAMENTE el producto de las imágenes",
+                "NO cambiar características o inventar funciones",
+                "Mantener colores y detalles reales del producto",
+                "Enfocar en beneficios visibles y reales",
+                "Evitar ángulos dramáticos si las imágenes son limitadas"
+            ]
+        else:
+            product_elements = []
+        
+        # Elementos de narración natural con consistencia específica
+        narration_elements = []
         if add_narration:
-            narrative_elements.extend([
-                f"continuous {language} voiceover narration",
-                f"consistent {language} storytelling voice throughout",
-                f"clear {language} audio with perfect pronunciation",
-                "NO language switching or mixing",
-                "NO repeated letters or words",
-                "smooth natural speech flow"
-            ])
+            narration_elements = [
+                f"UNA SOLA persona hablando consistentemente en {language}",
+                "MISMO narrador durante TODO el video y extensiones", 
+                "Voz característica y única que se mantenga en extensiones",
+                "Tono conversacional, auténtico y CONSTANTE",
+                "Explicación clara y directa de beneficios del producto",
+                f"Audio limpio y consistente en {language}",
+                "NO cambios de narrador o presentador",
+                "Mantener MISMA personalidad vocal en extensiones",
+                "Ritmo natural y estable de conversación"
+            ]
         
+        # Elementos de texto overlay minimalista
+        text_elements = []
         if text_overlays:
-            narrative_elements.extend([
-                f"MINIMALIST {language} text overlays (1-2 words maximum)",
-                f"extract KEY WORDS from narration in {language}",
-                "ULTRA HIGH CONTRAST animated text",
-                "SIMPLE impactful words only",
-                f"NO full sentences, ONLY {language} language",
-                "mobile-optimized LARGE text size"
-            ])
+            text_elements = [
+                f"Texto overlay MINIMALISTA en {language}",
+                "Máximo 1-2 palabras clave",
+                "Fuente bold, alto contraste",
+                "Aparición sutil y breve",
+                "Coordinado con la narración"
+            ]
         
-        # Negative prompt mejorado con énfasis en texto minimalista
-        enhanced_negative = "blurry, low quality, static camera, poor lighting, amateur, pixelated, distorted audio, silent video, illegible text, blurry text, small text, low contrast text, unreadable overlays, language switching, mixed languages, repeated words, stuttering, poor pronunciation, inconsistent voice, complex text phrases, long sentences in overlays, unclear language text, multiple languages mixed"
+        # Restricciones críticas para consistencia de narrador y producto
+        consistency_rules = [
+            "MANTENER el mismo narrador en toda extensión (MISMA voz y persona)",
+            "MANTENER el mismo producto en toda extensión",
+            "PROHIBIDO cambiar de presentador o voz entre segmentos",
+            "PROHIBIDO cambiar ángulos dramáticamente",
+            "PROHIBIDO inventar características no visibles",
+            "PROHIBIDO cambios abruptos de volumen o tono",
+            "MANTENER el mismo estilo visual y vocal",
+            "Continuidad total de la misma persona hablando"
+        ]
         
-        # Combinar todo
-        style_elements = reel_elements[:3] + narrative_elements[:2]
-        optimized_prompt = f"{reel_style_prefix}{prompt}. Style: {', '.join(style_elements)}. Avoid: {enhanced_negative}"
+        # Combinar elementos según configuración
+        all_elements = authenticity_elements
+        if product_elements:
+            all_elements.extend(product_elements[:3])
+        if narration_elements:
+            all_elements.extend(narration_elements[:3])
+        if text_elements:
+            all_elements.extend(text_elements[:2])
         
-        logger.info(f"Prompt optimizado para reel: {len(optimized_prompt)} caracteres")
+        # Construir prompt optimizado
+        optimized_prompt = f"{base_reel_prompt}"
+        optimized_prompt += f"CARACTERÍSTICAS: {'. '.join(all_elements[:8])}. "
+        optimized_prompt += f"REGLAS: {'. '.join(consistency_rules[:3])}."
+        
+        logger.info(f"Prompt optimizado para reel natural: {len(optimized_prompt)} caracteres")
         return optimized_prompt
         
     except Exception as e:
@@ -518,49 +547,97 @@ def get_localized_text_specs(detected_language: str) -> str:
 def build_extension_prompt(
     core_theme: str,
     detected_language: str,
-    dynamic_camera_changes: bool = True,
+    dynamic_camera_changes: bool = False,  # Cambiar default a False
     is_reel_content: bool = True
 ) -> str:
     """
-    Construye el prompt para extensión de video siempre en español
+    Construye el prompt para extensión de video manteniendo máxima consistencia
     
     Args:
         core_theme: Tema principal del video
         detected_language: Idioma (ignorado, siempre usa español)
-        dynamic_camera_changes: Si usar cambios de cámara dinámicos
+        dynamic_camera_changes: Si usar cambios de cámara dinámicos (False por defecto)
         is_reel_content: Si es contenido tipo reel
         
     Returns:
-        Prompt para extensión siempre en español
+        Prompt para extensión que mantiene total consistencia
     """
-    # Forzar siempre español
-    text_specs = get_localized_text_specs("spanish")
     
-    if dynamic_camera_changes:
-        if is_reel_content:
-            return f"""Continuar {core_theme}. CAMBIO DINÁMICO DE CÁMARA: Detalles de cerca, nuevo ángulo, transición suave.
-            
-            NARRACIÓN: Mantener voz en off continua en español. NO cambiar de idioma. TODO EN ESPAÑOL.
-            
-            {text_specs}
-            
-            CRÍTICO: El texto debe ser MINIMALISTA - solo 1-2 PALABRAS CLAVE que coincidan con lo que dice el narrador EN ESPAÑOL."""
-        else:
-            return f"""Continuar showcase del producto. TRANSICIÓN DE CÁMARA: Nueva perspectiva, vista detallada, mismo flujo de narración en español.
-            
-            {text_specs}
-            
-            Mantener texto SIMPLE y SOLO en español. Extraer palabras clave de la narración en español."""
+    # Prompt base que garantiza continuidad absoluta
+    base_prompt = f"""CONTINUAR VIDEO EXACTO - MISMO PRODUCTO: {core_theme}
+
+REGLAS ABSOLUTAS PARA EXTENSIÓN:
+1. MISMO PRODUCTO: Continuar con el producto EXACTO mostrado en el video anterior
+2. MISMO NARRADOR: La MISMA persona que habló en el video anterior debe continuar hablando
+3. MISMA VOZ: Mantener exactamente la misma voz, tono, acento y estilo de narración
+4. MISMO CONTEXTO: Mantener la misma persona, ambiente y escenario visual
+5. MISMO VOLUMEN: Audio consistente, SIN cambios de volumen abruptos
+6. MISMA PERSPECTIVA: NO cambiar ángulos dramáticamente
+7. MISMO TEMA: NO introducir productos o temas diferentes
+
+CONTINUIDAD DE NARRACIÓN:
+- El MISMO narrador que comenzó el video debe continuar hasta el final
+- Mantener exactamente el MISMO tono de voz y estilo narrativo
+- Continuar la conversación donde se quedó en el video anterior
+- NO cambiar de persona que habla o presenta el producto
+- Usar las MISMAS características vocales (velocidad, entonación, personalidad)
+
+CONTINUACIÓN NATURAL:
+- La MISMA persona continúa explicando el MISMO producto
+- Mantener el mismo ritmo y energía del video base
+- Seguir el flujo natural de la presentación anterior
+- Enfocarse en características ya mencionadas o visibles
+- NO inventar nuevas funciones o cambiar el producto
+
+PROHIBIDO EN EXTENSIÓN:
+- Cambiar de narrador o persona que habla
+- Usar una voz diferente o nuevo presentador
+- Cambiar el estilo de narración establecido
+- Modificar el tono o personalidad de la voz
+- Cambiar de producto o mostrar productos diferentes
+- Cambiar dramáticamente el volumen de audio
+- Introducir nuevos escenarios o personas
+- Modificar el estilo visual establecido
+- Alucinar características no presentes en imágenes originales
+
+ESTILO REEL NATURAL:
+- Persona real demostrando el producto
+- Iluminación natural y consistente
+- Movimientos de cámara MÍNIMOS y suaves
+- Audio con nivel constante
+- Transiciones naturales y sutiles"""
+
+    # Agregar especificaciones de cámara según el parámetro
+    if dynamic_camera_changes and is_reel_content:
+        camera_specs = """
+MOVIMIENTO DE CÁMARA SUTIL:
+- Zoom muy gradual en detalles específicos
+- Movimiento lateral LENTO si es necesario
+- Mantener el mismo encuadre general
+- NO hacer movimientos bruscos o dramáticos"""
     else:
-        if is_reel_content:
-            return f"""Continuar mostrando {core_theme}. Transición suave, mismo estilo, mantener narración en español.
-            
-            {text_specs}
-            
-            Usar texto overlay MINIMALISTA (1-2 palabras) que coincidan con las palabras clave del narrador EN ESPAÑOL."""
-        else:
-            return f"""Continuar showcase del producto. Transición suave, mismo estilo visual, narración continua en español.
-            
-            {text_specs}
-            
-            Texto overlay: SOLO palabras clave de la descripción del producto EN ESPAÑOL. Máximo 2 palabras."""
+        camera_specs = """
+CÁMARA ESTÁTICA:
+- Mantener el mismo encuadre del video anterior
+- Solo pequeños ajustes de enfoque si es necesario
+- Evitar cualquier movimiento dramático
+- Preservar la misma perspectiva visual"""
+
+    # Especificaciones de texto overlay y audio
+    text_specs = """
+TEXTO OVERLAY CONSISTENTE:
+- Máximo 1-2 palabras relacionadas al producto
+- Fuente bold, alto contraste
+- Aparición sutil y coherente con la narración
+- TODO EN ESPAÑOL, texto minimalista
+- NO usar frases completas o texto complejo
+
+CONTROL DE AUDIO Y NARRACIÓN:
+- MISMA voz del narrador original debe continuar
+- Mantener exactamente el MISMO tono y estilo vocal
+- Audio con nivel constante, sin cambios de volumen
+- Continuar la conversación natural donde se quedó
+- NO introducir nuevos narradores o voces diferentes
+- Preservar las características únicas de la voz original"""
+
+    return f"{base_prompt}\n{camera_specs}\n{text_specs}\n\nLa extensión debe ser una continuación perfecta y natural del video anterior."

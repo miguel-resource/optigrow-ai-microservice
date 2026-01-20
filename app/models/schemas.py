@@ -205,32 +205,32 @@ class GenerateVideoFromImagesRequest(BaseModel):
         pattern="^(smooth|crossfade|morph|zoom|slide)$"
     )
     aspect_ratio: str = Field(
-        default="16:9", 
+        default="9:16", 
         description="Relación de aspecto del video",
         pattern="^(16:9|9:16|1:1)$"
     )
     resolution: str = Field(
-        default="720p", 
+        default="1080p", 
         description="Resolución del video",
         pattern="^(720p|1080p)$"
     )
     duration_seconds: int = Field(
         default=15, 
-        description="Duración total del video en segundos (8, 15, 22, 29 o 58 - donde 58 = 2 segmentos concatenados)",
+        description="Duración total del video en segundos (8, 15, 22, 29 o 58)",
         ge=8, le=58
     )
     fps: int = Field(
-        default=24, 
+        default=30, 
         description="Fotogramas por segundo",
         ge=24, le=60
     )
     interpolation_frames: int = Field(
-        default=12, 
+        default=8, 
         description="Frames de interpolación entre imágenes",
         ge=6, le=24
     )
     motion_strength: float = Field(
-        default=0.7, 
+        default=0.2, 
         description="Intensidad del movimiento aplicado",
         ge=0.0, le=1.0
     )
@@ -240,14 +240,14 @@ class GenerateVideoFromImagesRequest(BaseModel):
     )
     pan_direction: Optional[str] = Field(
         default=None, 
-        description="Dirección de paneo"
+        description="Dirección de paneo (opcional)"
     )
     fade_transitions: bool = Field(
         default=True, 
         description="Usar fundidos suaves entre transiciones"
     )
     style: Optional[str] = Field(
-        default=None, 
+        default="natural_reel", 
         description="Estilo cinematográfico"
     )
     seed: Optional[int] = Field(
@@ -258,6 +258,79 @@ class GenerateVideoFromImagesRequest(BaseModel):
         default=False,
         description="Si es True, retorna el archivo de video directamente en lugar de metadata"
     )
+    # Campos adicionales opcionales para compatibilidad con Laravel
+    is_product_showcase: Optional[bool] = Field(
+        default=True,
+        description="Si es un showcase de producto"
+    )
+    maintain_context: Optional[bool] = Field(
+        default=True,
+        description="Mantener coherencia entre segmentos"
+    )
+    add_narration: Optional[bool] = Field(
+        default=True,
+        description="Incluir narración continua"
+    )
+    text_overlays: Optional[bool] = Field(
+        default=True,
+        description="Agregar texto overlay dinámico"
+    )
+    dynamic_camera_changes: Optional[bool] = Field(
+        default=False,
+        description="Usar cambios de cámara en extensiones"
+    )
+    audio_sync: Optional[bool] = Field(
+        default=True,
+        description="Sincronizar con audio mejorado"
+    )
+    use_nano_banana: Optional[bool] = Field(
+        default=True,
+        description="Usar Nano Banana para coherencia visual"
+    )
+    
+    @field_validator('duration_seconds', mode='before')
+    @classmethod
+    def convert_duration_to_int(cls, v):
+        """Convierte string a int para duration_seconds"""
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError(f"duration_seconds debe ser un número entero, recibido: {v}")
+        return v
+    
+    @field_validator('fps', mode='before') 
+    @classmethod
+    def convert_fps_to_int(cls, v):
+        """Convierte string a int para fps"""
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError(f"fps debe ser un número entero, recibido: {v}")
+        return v
+    
+    @field_validator('interpolation_frames', mode='before')
+    @classmethod
+    def convert_interpolation_frames_to_int(cls, v):
+        """Convierte string a int para interpolation_frames"""
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                raise ValueError(f"interpolation_frames debe ser un número entero, recibido: {v}")
+        return v
+    
+    @field_validator('motion_strength', mode='before')
+    @classmethod
+    def convert_motion_strength_to_float(cls, v):
+        """Convierte string a float para motion_strength"""
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                raise ValueError(f"motion_strength debe ser un número decimal, recibido: {v}")
+        return v
     
     @field_validator('fps')
     @classmethod
@@ -283,8 +356,8 @@ class GenerateVideoFromImagesRequest(BaseModel):
     @field_validator('style')
     @classmethod
     def validate_style(cls, v):
-        if v is not None and v not in ['cinematic', 'documentary', 'artistic']:
-            raise ValueError('style debe ser cinematic, documentary o artistic')
+        if v is not None and v not in ['cinematic', 'documentary', 'artistic', 'natural_reel', 'reel_optimized']:
+            raise ValueError('style debe ser cinematic, documentary, artistic, natural_reel o reel_optimized')
         return v
     
     class Config:
