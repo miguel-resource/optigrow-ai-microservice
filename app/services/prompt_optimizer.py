@@ -39,48 +39,108 @@ def enhance_prompt_consistency(
         Prompt mejorado para mantener coherencia entre segmentos
     """
     try:
-        # Prefijos según la posición del segmento
+        # Detectar idioma del prompt base para mantener consistencia
+        is_spanish = any(word in base_prompt.lower() for word in ['producto', 'con', 'para', 'de', 'la', 'el', 'audífono', 'este'])
+        language = "español" if is_spanish else "inglés"
+        
+        # Definir características que deben mantenerse según el segmento
         if segment_number == 1:
-            position_prefix = "Opening sequence: "
-            camera_style = "establishing shot, wide angle, product introduction"
-        elif segment_number == total_segments:
-            position_prefix = "Closing sequence: "
-            camera_style = "close-up details, final showcase, call-to-action angle"
+            # Primer segmento: Con presentador visible
+            narrator_continuity = {
+                "voice": "Voz profesional y amigable del presentador",
+                "style": "Presentación directa con presentador visible",
+                "energy": "Entusiasmo natural y creíble",
+                "approach": "Presentador hablando directamente a cámara"
+            }
         else:
-            position_prefix = f"Continuation sequence {segment_number}/{total_segments}: "
-            camera_style = "dynamic angle change, different perspective, engaging transition"
+            # Segmentos siguientes: Voice-over conservando solo la voz
+            narrator_continuity = {
+                "voice": "EXACTAMENTE la MISMA voz del presentador del primer segmento",
+                "style": "Voice-over profesional (sin presentador visible)",
+                "energy": "MISMO nivel de energía y entusiasmo que el primer segmento", 
+                "approach": "Narración sobre tomas del producto, cambio de escenario natural"
+            }
         
-        # Elementos de coherencia
-        consistency_elements = [
-            "maintaining visual style",
-            "consistent lighting",
-            "smooth narrative flow",
-            "matching color palette",
-            "seamless transitions",
-            "continuous narration voice",
-            "SAME LANGUAGE throughout",
-            "LEGIBLE text overlays with high contrast",
-            "readable typography throughout",
-            "NO language switching"
-        ]
+        # Prefijos según la posición del segmento con enfoque de tomas diferentes
+        if segment_number == 1:
+            position_prefix = f"PRIMERA TOMA - Presentación con presentador en {language}: "
+            narrative_flow = "Presentador introduce el producto, crea conexión inicial, establece credibilidad"
+            camera_style = "presentador visible, establecer conexión, introducir producto"
+        elif segment_number == total_segments:
+            position_prefix = f"SEGUNDA TOMA - Voice-over en {language}: "
+            narrative_flow = "MISMA VOZ del primer presentador pero como narrador. Mostrar producto en detalle, profundizar beneficios, llamada a la acción"
+            camera_style = "enfoque en producto, diferentes ángulos, sin presentador visible, tomas cinematográficas"
+        else:
+            position_prefix = f"TOMA INTERMEDIA {segment_number}/{total_segments} - Voice-over en {language}: "
+            narrative_flow = f"MISMA VOZ continuando la narrativa, desarrollo de puntos clave"
+            camera_style = "producto protagonista, ángulos dinámicos, sin presentador"
         
-        # Construir prompt mejorado
-        enhanced_prompt = f"{position_prefix}{base_prompt}"
+        # Elementos de coherencia adaptados al concepto de tomas diferentes
+        if segment_number == 1:
+            # Primera toma: Con presentador
+            consistency_elements = [
+                "presentador profesional y creíble estableciendo conexión",
+                "introducción natural del producto",
+                "establecer voz y personalidad del narrador",
+                "ambiente profesional pero cercano",
+                "crear base para continuidad de voz"
+            ]
+        else:
+            # Tomas siguientes: Voice-over manteniendo solo la voz
+            consistency_elements = [
+                f"EXACTAMENTE {narrator_continuity['voice']} del primer segmento",
+                "voice-over natural sin presentador visible",
+                "enfoque total en el producto",
+                "continuidad narrativa fluida",
+                "misma personalidad y energía en la voz",
+                "cambio natural de escenario/toma",
+                f"HABLAR ÚNICAMENTE EN {language.upper()}",
+                "tomas cinematográficas del producto",
+                "transición natural entre segmentos",
+                "NO cambiar el tono de voz establecido"
+            ]
+        
+        # Construir prompt mejorado con concepto de cambio de toma
+        enhanced_prompt = f"{position_prefix}"
+        enhanced_prompt += f"AUDIO: {narrator_continuity['voice']}, {narrator_continuity['energy']}. "
+        enhanced_prompt += f"ESTILO: {narrator_continuity['style']}. "
+        enhanced_prompt += f"{base_prompt} "
         
         if previous_context:
-            enhanced_prompt += f" Continuing from: {previous_context}"
+            enhanced_prompt += f"CONTINUAR NARRATIVA DESDE: {previous_context}. "
+        
+        enhanced_prompt += f"FLUJO: {narrative_flow}. "
         
         if dynamic_camera_changes:
-            enhanced_prompt += f". Camera: {camera_style}"
+            enhanced_prompt += f"VISUAL: {camera_style}. "
         
-        if maintain_language:
-            # Forzar siempre español para todos los videos
-            detected_language = "spanish"
-            enhanced_prompt += f". MAINTAIN {detected_language.upper()} ONLY, NO language mixing"
+        # Instrucciones específicas según el tipo de toma
+        if segment_number == 1:
+            enhanced_prompt += f"""
+            PRIMERA TOMA - PRESENTADOR VISIBLE:
+            1. Presentador profesional estableciendo credibilidad
+            2. Introducir producto naturalmente
+            3. Crear conexión con audiencia
+            4. Establecer voz y tono para continuidad
+            5. Hablar en {language.upper()} únicamente
+            6. Ambiente profesional pero accesible
+            """
+        else:
+            enhanced_prompt += f"""
+            SEGUNDA TOMA - VOICE-OVER (CAMBIO DE ESCENARIO):
+            1. MISMA VOZ del presentador del primer segmento
+            2. Voice-over profesional SIN presentador visible
+            3. Enfoque cinematográfico en el producto
+            4. Continuar mensaje donde terminó primer segmento
+            5. Hablar SOLO EN {language.upper()}
+            6. Mostrar producto desde nuevos ángulos
+            7. Ambiente/escenario diferente pero profesional
+            8. Mantener MISMA energía y personalidad en la voz
+            """
         
-        enhanced_prompt += f". Ensure: {', '.join(consistency_elements[:6])}, CLEAR READABLE text overlays, continuous narration WITHOUT REPETITIONS"
+        enhanced_prompt += f". ASEGURAR: {', '.join(consistency_elements[:5])}"
         
-        logger.info(f"Prompt mejorado para segmento {segment_number}/{total_segments}")
+        logger.info(f"Prompt de continuidad mejorado para segmento {segment_number}/{total_segments} con narrador consistente")
         return enhanced_prompt
         
     except Exception as e:
@@ -107,7 +167,8 @@ def optimize_prompt_for_reel(
     is_product_showcase: bool = True, 
     add_narration: bool = True, 
     text_overlays: bool = True, 
-    language: str = "spanish"
+    language: str = "spanish",
+    text_overlay_level: str = "minimal"
 ) -> str:
     """
     Optimiza el prompt para crear contenido natural tipo reel con personas reales
@@ -118,6 +179,7 @@ def optimize_prompt_for_reel(
         add_narration: Incluir elementos de narración
         text_overlays: Incluir texto overlays dinámicos
         language: Idioma para mantener consistencia (default: spanish)
+        text_overlay_level: Nivel de texto dinámico - "none", "minimal", "moderate", "extensive" (default: "minimal")
         
     Returns:
         Prompt optimizado para reel natural con personas
@@ -162,16 +224,31 @@ def optimize_prompt_for_reel(
                 "Ritmo natural y estable de conversación"
             ]
         
-        # Elementos de texto overlay minimalista
+        # Elementos de texto overlay según el nivel especificado
         text_elements = []
-        if text_overlays:
-            text_elements = [
-                f"Texto overlay MINIMALISTA en {language}",
-                "Máximo 1-2 palabras clave",
-                "Fuente bold, alto contraste",
-                "Aparición sutil y breve",
-                "Coordinado con la narración"
-            ]
+        if text_overlays and text_overlay_level != "none":
+            if text_overlay_level == "minimal":
+                text_elements = [
+                    f"Texto MÍNIMO en {language}",
+                    "Solo título del producto y precio",
+                    "Máximo 2 elementos de texto total",
+                    "Aparición breve y sutil"
+                ]
+            elif text_overlay_level == "moderate":
+                text_elements = [
+                    f"Texto MODERADO en {language}",
+                    "Título del producto y 2-3 beneficios",
+                    "Alto contraste, posición estratégica",
+                    "No interferir con el producto"
+                ]
+            elif text_overlay_level == "extensive":
+                text_elements = [
+                    f"Texto EXTENSO en {language}",
+                    "Overlays detallados con especificaciones",
+                    "Títulos, beneficios, características técnicas",
+                    "Tipografía bold, animaciones suaves",
+                    "Elementos visuales destacados"
+                ]
         
         # Restricciones críticas para consistencia de narrador y producto
         consistency_rules = [

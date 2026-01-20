@@ -287,7 +287,13 @@ async def generate_video_from_images(
             pan_direction=request.pan_direction,
             fade_transitions=request.fade_transitions,
             style=request.style,
-            seed=request.seed
+            seed=request.seed,
+            is_product_showcase=request.is_product_showcase,
+            maintain_context=request.maintain_context,
+            add_narration=request.add_narration,
+            text_overlays=request.text_overlays,
+            text_overlay_level=request.text_overlay_level,
+            dynamic_camera_changes=request.dynamic_camera_changes
         )
         
         logger.info(f"Video desde imágenes generado exitosamente: {result['operation_id']}")
@@ -372,7 +378,13 @@ async def generate_video_from_images(
                     pan_direction=None,
                     fade_transitions=True,
                     style="cinematic",  # Estilo más conservador
-                    seed=request.seed
+                    seed=request.seed,
+                    is_product_showcase=True,
+                    maintain_context=False,
+                    add_narration=True,
+                    text_overlays=False,  # Sin texto para evitar problemas
+                    text_overlay_level="none",
+                    dynamic_camera_changes=False
                 )
                 
                 logger.info(f"Video generado exitosamente con configuración alternativa: {result['operation_id']}")

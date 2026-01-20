@@ -275,6 +275,11 @@ class GenerateVideoFromImagesRequest(BaseModel):
         default=True,
         description="Agregar texto overlay dinámico"
     )
+    text_overlay_level: Optional[str] = Field(
+        default="minimal",
+        description="Nivel de texto dinámico: 'none', 'minimal', 'moderate', 'extensive'",
+        pattern="^(none|minimal|moderate|extensive)$"
+    )
     dynamic_camera_changes: Optional[bool] = Field(
         default=False,
         description="Usar cambios de cámara en extensiones"

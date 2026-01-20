@@ -493,7 +493,8 @@ class GeminiService:
         prompt: str,
         extension_seconds: int = 7,
         model_name: str = "veo-3.1-generate-preview",
-        aspect_ratio: str = "9:16"
+        aspect_ratio: str = "9:16",
+        dynamic_camera_changes: bool = False
     ) -> Dict[str, Any]:
         """
         Extiende un video existente por 7 segundos adicionales con cambios dinámicos de cámara.
@@ -682,10 +683,13 @@ class GeminiService:
         pan_direction: Optional[str] = None,  # Sin paneo por defecto
         fade_transitions: bool = True,
         style: Optional[str] = "natural_reel",
+        seed: Optional[int] = None,
+        use_nano_banana: bool = True,
         is_product_showcase: bool = True,
         maintain_context: bool = True,
         add_narration: bool = True,
         text_overlays: bool = True,
+        text_overlay_level: str = "minimal",  # "none", "minimal", "moderate", "extensive"
         dynamic_camera_changes: bool = False  # Deshabilitar por defecto
     ) -> Dict[str, Any]:
         """
@@ -731,7 +735,8 @@ class GeminiService:
             is_product_showcase (bool): Optimizar para showcase de productos (default: True)
             maintain_context (bool): Mantener coherencia entre segmentos (default: True)
             add_narration (bool): Incluir narración continua y envolvente (default: True)
-            text_overlays (bool): Agregar texto dynamic_camera_changesque aparece dinámicamente (default: True)
+            text_overlays (bool): Agregar texto dinámico que aparece dinámicamente (default: True)
+            text_overlay_level (str): Nivel de texto dinámico - "none", "minimal", "moderate", "extensive" (default: "minimal")
             dynamic_camera_changes (bool): Usar cambios de cámara en extensiones (default: True)
         
         Returns:
@@ -787,7 +792,7 @@ class GeminiService:
             if maintain_context and not is_medical_content:  # Solo optimizar si no es contenido médico
                 # Detectar idioma del prompt para mantener consistencia
                 detected_language = detect_language(prompt)
-                optimized_prompt = optimize_prompt_for_reel(optimized_prompt, is_product_showcase, add_narration, text_overlays, detected_language)
+                optimized_prompt = optimize_prompt_for_reel(optimized_prompt, is_product_showcase, add_narration, text_overlays, detected_language, text_overlay_level)
                 logger.info(f"Prompt optimizado para coherencia, narración y estética de reel con idioma: {detected_language}")
             elif is_medical_content:
                 detected_language = "spanish"
@@ -847,7 +852,7 @@ class GeminiService:
                 return await self._generate_concatenated_video(
                     images, optimized_prompt, 29, transition_style, aspect_ratio, 
                     motion_strength, fps, interpolation_frames, pan_direction, model_name,
-                    is_product_showcase, maintain_context, add_narration, text_overlays, dynamic_camera_changes
+                    is_product_showcase, maintain_context, add_narration, text_overlays, text_overlay_level, dynamic_camera_changes
                 )
             
             # Determinar si necesitamos generar por bloques (para videos <= 29s)
@@ -909,15 +914,33 @@ class GeminiService:
                 - Composición vertical perfecta para formato 9:16
                 - CÁMARA DINÁMICA: {"Cambios de ángulo y perspectiva" if dynamic_camera_changes else "Movimientos suaves y constantes"}
                 - NARRACIÓN CONTINUA EN {detected_language.upper()}: Voz envolvente que explique el producto durante todo el video
-                - TEXTO DINÁMICO LEGIBLE EN {detected_language.upper()}: 
-                  * Overlays con ALTO CONTRASTE (texto blanco sobre fondos oscuros o viceversa)
-                  * Tamaño de fuente GRANDE y CLARO para móviles (mínimo 24pt equivalente)
-                  * Tipografía BOLD y fácil de leer (Arial, Helvetica, sans-serif)
-                  * Posición estratégica que no interfiera con el producto
-                  * Duración suficiente para lectura (mínimo 3 segundos por texto)
-                  * Animaciones suaves de entrada y salida
-                - ELEMENTOS VISUALES: Textos destacados, títulos llamativos, información del producto
+                """
                 
+                # Añadir texto dinámico según el nivel especificado
+                if text_overlays and text_overlay_level != "none":
+                    if text_overlay_level == "minimal":
+                        enhanced_prompt += f"""
+                - TEXTO MÍNIMO: Solo título del producto y beneficio principal
+                  * Máximo 2-3 elementos de texto durante todo el video
+                  * Texto claro sin saturar la pantalla
+                """
+                    elif text_overlay_level == "moderate":
+                        enhanced_prompt += f"""
+                - TEXTO MODERADO EN {detected_language.upper()}: 
+                  * Título del producto y 2-3 beneficios clave
+                  * Overlays con alto contraste, posición estratégica
+                  * No interferir con el producto
+                """
+                    elif text_overlay_level == "extensive":
+                        enhanced_prompt += f"""
+                - TEXTO DINÁMICO EXTENSO EN {detected_language.upper()}: 
+                  * Overlays detallados con especificaciones
+                  * Títulos, beneficios, características técnicas
+                  * Alto contraste, tipografía bold para móviles
+                  * Animaciones suaves de entrada y salida
+                """
+                
+                enhanced_prompt += f"""
                 COHERENCIA Y CONTINUIDAD:
                 - MANTENER tema principal "{optimized_prompt}" en TODO el video
                 - Audio limpio y continuo entre segmentos (sin cortes abruptos)
@@ -1623,6 +1646,7 @@ class GeminiService:
         maintain_context: bool = True,
         add_narration: bool = True,
         text_overlays: bool = True,
+        text_overlay_level: str = "minimal",
         dynamic_camera_changes: bool = True
     ) -> Dict[str, Any]:
         """
@@ -1656,6 +1680,29 @@ class GeminiService:
             
             # Aplicar optimización de coherencia entre segmentos
             if maintain_context:
+                # Generar contexto detallado para el cambio de toma
+                segment1_context = f"""
+                PRIMERA TOMA COMPLETADA:
+                - Presentador profesional estableció conexión y credibilidad
+                - Voz característica del narrador ya definida
+                - Producto introducido con interés inicial
+                - Idioma: Español únicamente
+                - Tono: Entusiasta pero creíble, profesional
+                - Base narrativa establecida para continuidad
+                """
+                
+                segment2_context = f"""
+                SEGUNDA TOMA - VOICE-OVER:
+                - MISMA VOZ del presentador del primer segmento (voice-over)
+                - SIN presentador visible - enfoque en el producto
+                - Cambio natural de escenario/ambiente
+                - Continuar donde terminó la primera toma
+                - Profundizar en beneficios específicos
+                - Tomas cinematográficas del producto
+                - Mantener EXACTAMENTE la misma voz y personalidad
+                - Cerrar con llamada a la acción convincente
+                """
+                
                 # Usar función de coherencia para prompts mejorados
                 segment1_prompt = enhance_prompt_consistency(
                     base_prompt=base_prompt,
@@ -1670,10 +1717,12 @@ class GeminiService:
                     base_prompt=base_prompt,
                     segment_number=2, 
                     total_segments=2,
-                    previous_context="primer segmento con showcasing del producto y narración introductoria en el mismo idioma",
+                    previous_context=segment1_context,
                     dynamic_camera_changes=dynamic_camera_changes,
                     maintain_language=True
                 )
+                
+                logger.info("Prompts optimizados para cambio natural de toma: Presentador visible → Voice-over con misma voz")
             else:
                 # Prompts tradicionales simplificados 
                 segment1_prompt = f"Professional product showcase - part 1: {base_prompt[:50]}"
@@ -1697,6 +1746,7 @@ class GeminiService:
                 maintain_context=maintain_context,
                 add_narration=add_narration,
                 text_overlays=text_overlays,
+                text_overlay_level=text_overlay_level,
                 dynamic_camera_changes=dynamic_camera_changes
             )
             
@@ -1717,6 +1767,7 @@ class GeminiService:
                 maintain_context=maintain_context,
                 add_narration=add_narration,
                 text_overlays=text_overlays,
+                text_overlay_level=text_overlay_level,
                 dynamic_camera_changes=dynamic_camera_changes
             )
             
