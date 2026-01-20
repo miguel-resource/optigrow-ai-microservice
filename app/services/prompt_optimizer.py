@@ -74,7 +74,8 @@ def enhance_prompt_consistency(
             enhanced_prompt += f". Camera: {camera_style}"
         
         if maintain_language:
-            detected_language = "spanish" if any(word in base_prompt.lower() for word in ['producto', 'este', 'con', 'para', 'de', 'la', 'el']) else "english"
+            # Forzar siempre español para todos los videos
+            detected_language = "spanish"
             enhanced_prompt += f". MAINTAIN {detected_language.upper()} ONLY, NO language mixing"
         
         enhanced_prompt += f". Ensure: {', '.join(consistency_elements[:6])}, CLEAR READABLE text overlays, continuous narration WITHOUT REPETITIONS"
@@ -89,19 +90,16 @@ def enhance_prompt_consistency(
 
 def detect_language(text: str) -> str:
     """
-    Detecta el idioma del texto basándose en palabras clave
+    Detecta el idioma del texto - siempre devuelve español para garantizar contenido en español
     
     Args:
         text: Texto a analizar
         
     Returns:
-        Idioma detectado ('spanish' o 'english')
+        Siempre 'spanish' para asegurar contenido en español
     """
-    spanish_keywords = ['producto', 'este', 'con', 'para', 'de', 'la', 'el', 'un', 'una', 'los', 'las']
-    text_lower = text.lower()
-    
-    spanish_count = sum(1 for word in spanish_keywords if word in text_lower)
-    return "spanish" if spanish_count >= 2 else "english"
+    # Forzar siempre español para todos los videos
+    return "spanish"
 
 
 def optimize_prompt_for_reel(
@@ -339,15 +337,14 @@ def build_reel_enhanced_prompt(
         num_images: Número de imágenes
         transition_style: Estilo de transición
         time_per_image: Tiempo por imagen
-        detected_language: Idioma detectado
+        detected_language: Idioma (forzado a español para todos los videos)
         dynamic_camera_changes: Si usar cambios de cámara dinámicos
-        text_overlays: Si incluir overlays de texto
-        add_narration: Si incluir narración
-        aspect_ratio: Relación de aspecto
         
     Returns:
-        Prompt completo para generación de reel
+        Prompt completo para generación de reel en español
     """
+    # Forzar siempre español para todos los videos
+    detected_language = "spanish"
     enhanced_prompt = f"""
     REEL PROFESIONAL: Crear video {duration_seconds}s estilo Instagram/TikTok optimizado para móviles
     usando estas {num_images} imágenes del producto. {prompt}
@@ -425,17 +422,17 @@ def build_showcase_enhanced_prompt(
     
     AUDIO Y ESTÉTICA:
     - Audio continuo y sin cortes para mejor experiencia 
-    - NARRACIÓN PROFESIONAL: Voz clara que describe el producto durante todo el video
-    - TEXTO MINIMALISTA (1-2 PALABRAS MÁXIMO):
-      * Usar SOLO palabras clave extraídas de la descripción del producto
+    - NARRACIÓN PROFESIONAL EN ESPAÑOL: Voz clara que describe el producto durante todo el video ÚNICAMENTE en español
+    - TEXTO MINIMALISTA EN ESPAÑOL (1-2 PALABRAS MÁXIMO):
+      * Usar SOLO palabras clave extraídas de la descripción del producto EN ESPAÑOL
       * Ejemplo: si el producto es "Proteína de alta calidad" → mostrar solo "PROTEÍNA" o "CALIDAD"
       * MÁXIMO CONTRASTE: Texto blanco puro sobre negro sólido o viceversa
       * Fuente EXTRA GRANDE y BOLD (mínimo 32pt) para móviles
       * Texto ultra NÍTIDO sin pixelación
       * Posicionamiento que no obstruya el producto
-      * Palabras impactantes y simples
-      * Mismo idioma que la narración (español o inglés consistente)
-      * NO usar frases completas, SOLO palabras clave
+      * Palabras impactantes y simples EN ESPAÑOL
+      * SOLO ESPAÑOL en toda la narración y texto
+      * NO usar frases completas, SOLO palabras clave en español
       * Duración corta: 2-3 segundos por palabra
     - MOVIMIENTO DE CÁMARA: {"Dinámico con cambios de perspectiva" if dynamic_camera_changes else "Suave y consistente"}
     - Calidad profesional optimizada para redes sociales
@@ -490,6 +487,34 @@ RESTRICCIONES DE FIDELIDAD Y LEGIBILIDAD:
 - Texto overlays NÍTIDOS, contrastados y profesionales"""
 
 
+def get_localized_text_specs(detected_language: str) -> str:
+    """
+    Genera especificaciones de texto overlay siempre en español
+    
+    Args:
+        detected_language: Idioma (ignorado, siempre usa español)
+        
+    Returns:
+        Especificaciones de texto en español
+    """
+    # Forzar siempre español para todos los videos
+    return f"""
+    REGLAS DE TEXTO OVERLAY PARA EXTENSIÓN (SIEMPRE EN ESPAÑOL):
+    - Usar ÚNICAMENTE español para TODO el texto
+    - Extraer PALABRAS CLAVE CORTAS de la narración (máximo 1-2 palabras)
+    - Ejemplos: si la narración dice "Mejora tu rendimiento" → mostrar solo "RENDIMIENTO" o "MEJORA"
+    - Usar palabras EXACTAS de la descripción del producto que menciona el narrador
+    - Texto MINIMALISTA: preferir palabras impactantes individuales
+    - MÁXIMO 2 palabras por texto overlay
+    - ULTRA ALTO CONTRASTE: Texto blanco sobre fondo negro o viceversa
+    - Tamaño de fuente EXTRA GRANDE para legibilidad móvil
+    - Mostrar texto solo por 2-3 segundos
+    - NO usar frases complejas, NO oraciones completas
+    - NO mezclar idiomas, NO texto en inglés
+    - TODO EL CONTENIDO DEBE SER EN ESPAÑOL
+    """
+
+
 def build_extension_prompt(
     core_theme: str,
     detected_language: str,
@@ -497,59 +522,45 @@ def build_extension_prompt(
     is_reel_content: bool = True
 ) -> str:
     """
-    Construye el prompt para extensión de video
+    Construye el prompt para extensión de video siempre en español
     
     Args:
         core_theme: Tema principal del video
-        detected_language: Idioma detectado
+        detected_language: Idioma (ignorado, siempre usa español)
         dynamic_camera_changes: Si usar cambios de cámara dinámicos
         is_reel_content: Si es contenido tipo reel
         
     Returns:
-        Prompt para extensión
+        Prompt para extensión siempre en español
     """
-    # Especificaciones mejoradas para texto overlay minimalista
-    text_specs = f"""
-    TEXT OVERLAY RULES FOR EXTENSION:
-    - Use ONLY {detected_language} language for ALL text
-    - Extract SHORT KEY WORDS from narration (1-2 words maximum)
-    - Examples: if narration says "Mejora tu rendimiento" → show only "RENDIMIENTO" or "MEJORA"
-    - Use EXACT words from product description that narrator mentions
-    - MINIMAL text: prefer single impactful words
-    - MAXIMUM 2 words per text overlay
-    - ULTRA HIGH CONTRAST: White text on black background or vice versa
-    - EXTRA LARGE font size for mobile readability
-    - Show text for 2-3 seconds only
-    - NO complex phrases, NO full sentences
-    - NO mixed languages, NO unclear text
-    - MATCH narration language exactly
-    """
+    # Forzar siempre español
+    text_specs = get_localized_text_specs("spanish")
     
     if dynamic_camera_changes:
         if is_reel_content:
-            return f"""Continue {core_theme}. DYNAMIC CAMERA CHANGE: Close-up details, new angle, smooth transition. 
+            return f"""Continuar {core_theme}. CAMBIO DINÁMICO DE CÁMARA: Detalles de cerca, nuevo ángulo, transición suave.
             
-            NARRATION: Maintain continuous {detected_language} voiceover. NO language switching.
+            NARRACIÓN: Mantener voz en off continua en español. NO cambiar de idioma. TODO EN ESPAÑOL.
             
             {text_specs}
             
-            CRITICAL: Text must be MINIMALIST - only 1-2 KEY WORDS that match what narrator says."""
+            CRÍTICO: El texto debe ser MINIMALISTA - solo 1-2 PALABRAS CLAVE que coincidan con lo que dice el narrador EN ESPAÑOL."""
         else:
-            return f"""Continue product showcase. CAMERA TRANSITION: New perspective, detailed view, same {detected_language} narration flow.
+            return f"""Continuar showcase del producto. TRANSICIÓN DE CÁMARA: Nueva perspectiva, vista detallada, mismo flujo de narración en español.
             
             {text_specs}
             
-            Keep text SIMPLE and in {detected_language} only. Extract key words from narration."""
+            Mantener texto SIMPLE y SOLO en español. Extraer palabras clave de la narración en español."""
     else:
         if is_reel_content:
-            return f"""Continue showing {core_theme}. Smooth transition, same style, maintain {detected_language} narration.
+            return f"""Continuar mostrando {core_theme}. Transición suave, mismo estilo, mantener narración en español.
             
             {text_specs}
             
-            Use MINIMAL text overlays (1-2 words) matching narrator's key words in {detected_language}."""
+            Usar texto overlay MINIMALISTA (1-2 palabras) que coincidan con las palabras clave del narrador EN ESPAÑOL."""
         else:
-            return f"""Continue product showcase. Smooth transition, same visual style, continuous {detected_language} narration.
+            return f"""Continuar showcase del producto. Transición suave, mismo estilo visual, narración continua en español.
             
             {text_specs}
             
-            Text overlays: ONLY key words from product description in {detected_language}. Maximum 2 words."""
+            Texto overlay: SOLO palabras clave de la descripción del producto EN ESPAÑOL. Máximo 2 palabras."""
